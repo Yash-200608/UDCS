@@ -361,6 +361,15 @@ def _fix_owner_and_default_dacl(token: int, package_sid: str) -> None:
     ws.SetTokenInformation(token, ws.TokenDefaultDacl, dacl)
 
 
+def current_user_sid() -> str:
+    """The agent's own user SID: SYSTEM for the service, the user otherwise."""
+    import win32api
+    import win32security as ws
+
+    token = ws.OpenProcessToken(win32api.GetCurrentProcess(), ws.TOKEN_QUERY)
+    return ws.ConvertSidToStringSid(ws.GetTokenInformation(token, ws.TokenUser)[0])
+
+
 def _restricted_token(package_sid: str | None = None) -> wintypes.HANDLE:
     own = wintypes.HANDLE()
     api.check(

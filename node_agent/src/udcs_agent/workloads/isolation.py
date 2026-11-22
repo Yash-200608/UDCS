@@ -88,8 +88,15 @@ class AppContainerIsolation:
             if self._capability is not None:
                 return self._capability
             capability = ac.capability_sid(ac.RUNTIME_CAPABILITY)
+            # An AppContainer access check needs BOTH the normal token check (the agent's
+            # user, with Administrators deny-only) and the package/capability check. Name
+            # the agent's own user too, so admin-only directories work (measured on CI: an
+            # elevated-admin parent could not even write its workload's error file).
+            user = ac.current_user_sid()
             ac.grant(self.runtime, capability, ac.READ_EXECUTE)
+            ac.grant(self.runtime, user, ac.READ_EXECUTE)
             ac.grant(self.python_home, capability, ac.READ_EXECUTE)
+            ac.grant(self.python_home, user, ac.READ_EXECUTE)
         except OSError as exc:
             raise IsolationUnavailable(f"cannot prepare the isolated runtime: {exc}") from exc
         self._capability = capability
@@ -136,8 +143,10 @@ class AppContainerIsolation:
             workdir.mkdir(parents=True, exist_ok=True)
             (workdir / "tmp").mkdir(exist_ok=True)
             ac.grant(workdir, package, ac.MODIFY)
+            ac.grant(workdir, ac.current_user_sid(), ac.MODIFY)  # the agent's own identity
             for path in read_only:
                 ac.grant(path, package, ac.READ_EXECUTE)
+                ac.grant(path, ac.current_user_sid(), ac.READ_EXECUTE)
             ac.set_ui_restrictions(job)
             env = {
                 "SystemRoot": os.environ.get("SystemRoot", r"C:\Windows"),
