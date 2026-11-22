@@ -51,11 +51,16 @@ class WorkloadSpec:
     total_units: int = 10**9
     memory_mb: int = 256
     checkpointable: bool = True
+    # "host" (Job Object only; built-in catalog code) or "appcontainer" (required: the
+    # workload never starts without it). See workloads/isolation.py.
+    isolation: str = "host"
 
     def __post_init__(self) -> None:
         self.kind = WorkloadClass(self.kind)
         if not self.id.replace("-", "").isalnum() or len(self.id) > 64:
             raise ValueError("workload id must be alphanumeric/hyphen, <= 64 chars")
+        if self.isolation not in ("host", "appcontainer"):
+            raise ValueError(f"unknown isolation level {self.isolation!r}")
 
 
 @dataclass(frozen=True)
@@ -102,9 +107,11 @@ class WorkloadManager:
         python: str | None = None,
         clock=time.monotonic,
         restart_backoff_seconds: float = RESTART_BACKOFF_SECONDS,
+        isolation=None,  # AppContainerIsolation, or None where unavailable
     ) -> None:
         self.root = data_dir / "workloads"
         self.root.mkdir(parents=True, exist_ok=True)
+        self._isolation = isolation
         self._python = python or getattr(sys, "_base_executable", sys.executable)
         self._clock = clock
         self._backoff = restart_backoff_seconds
@@ -126,6 +133,9 @@ class WorkloadManager:
         self._purge_pending: set[str] = set()
         self._load_registry()
         self._ingest_requests()
+        if self._isolation is not None and hasattr(self._isolation, "sweep_orphans"):
+            # Profiles of workloads that no longer exist (agent died before a purge).
+            self._isolation.sweep_orphans(set(self._records))
 
     # -- registry (survives service restarts) ------------------------------------------------
 
@@ -240,7 +250,13 @@ class WorkloadManager:
                     running = self._running.pop(workload_id, None)
                     if running is not None:
                         self._terminate(running, wait_seconds=2.0 if body.get("purge") else 0)
-                    self._records.pop(workload_id, None)
+                    removed = self._records.pop(workload_id, None)
+                    if (
+                        removed is not None
+                        and removed.spec.isolation == "appcontainer"
+                        and self._isolation is not None
+                    ):
+                        self._isolation.release(workload_id)  # its AppContainer profile
                     if body.get("purge"):
                         self._purge_pending.add(workload_id)
                 self._dirty = True
@@ -517,13 +533,30 @@ class WorkloadManager:
             for k, v in os.environ.items()
             if k.upper() in ("SYSTEMROOT", "WINDIR", "TEMP", "TMP", "PATH", "PATHEXT", "COMSPEC")
         }
+        if record.spec.isolation == "appcontainer" and self._isolation is None:
+            # Required isolation is missing on this node: never run it any other way.
+            job.close()
+            self._set(record, WorkloadState.FAILED)
+            self._event(now, record.spec.id, "isolation_unavailable: appcontainer")
+            return
         try:
-            process = launch_in_job(argv, job, cwd=workdir, env=env)
-        except OSError:
+            if record.spec.isolation == "appcontainer":
+                from udcs_agent.workloads.isolation import IsolationUnavailable
+
+                try:
+                    process = self._isolation.launch(
+                        record.spec.id, "synthetic", argv[4:], job, workdir
+                    )
+                except IsolationUnavailable as exc:
+                    raise OSError(str(exc)) from exc
+            else:
+                process = launch_in_job(argv, job, cwd=workdir, env=env)
+        except OSError as exc:
             job.close()
             record.failures += 1
             record.restart_after = now + self._backoff
             logger.exception("could not start workload %s", record.spec.id)
+            self._event(now, record.spec.id, f"start_failed: {str(exc)[:120]}")
             self._set(
                 record,
                 WorkloadState.FAILED if record.failures >= MAX_FAILURES else WorkloadState.WAITING,
@@ -531,7 +564,7 @@ class WorkloadManager:
             return
         self._running[record.spec.id] = _Running(record.spec, workdir, job, process)
         self._set(record, WorkloadState.RUNNING)
-        self._event(now, record.spec.id, "started")
+        self._event(now, record.spec.id, f"started ({record.spec.isolation})")
 
     def _command(self, running: _Running, command: str, now: float) -> None:
         if running.coop_command == command:

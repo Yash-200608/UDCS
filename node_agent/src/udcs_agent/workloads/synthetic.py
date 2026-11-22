@@ -35,9 +35,18 @@ def _enter_background_mode() -> None:
     """Lower this process's I/O and memory priority (only callable on oneself)."""
     if sys.platform == "win32":
         import ctypes
+        from ctypes import wintypes
 
-        kernel32 = ctypes.WinDLL("kernel32")
-        kernel32.SetPriorityClass(kernel32.GetCurrentProcess(), 0x00100000)  # BACKGROUND_BEGIN
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        # Declared types matter: without them the pseudo-handle -1 is passed as a 32-bit
+        # 0xFFFFFFFF, an invalid handle. Windows ignored that silently on the host (so
+        # background mode was never applied before this fix), and an AppContainer's
+        # strict handle checking turned it into a crash.
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel32.SetPriorityClass.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        kernel32.SetPriorityClass.restype = wintypes.BOOL
+        if not kernel32.SetPriorityClass(kernel32.GetCurrentProcess(), 0x00100000):  # BG_BEGIN
+            raise OSError(ctypes.get_last_error(), "could not enter background mode")
 
 
 class _Control:
@@ -103,7 +112,10 @@ def _make_unit(kind: str, workdir: Path, memory_mb: int):
 
         return unit, lambda: path.unlink(missing_ok=True)
     if kind == "gpu":
-        from udcs_agent.workloads.cudadrv import CudaDevice
+        try:
+            from udcs_agent.workloads.cudadrv import CudaDevice
+        except ImportError:  # isolated runtime: copied next to this file, no agent package
+            from cudadrv import CudaDevice  # type: ignore[no-redef]
 
         device = CudaDevice()
         iters = device.calibrate(0.04)  # 40 ms kernels: far below the 2 s TDR limit

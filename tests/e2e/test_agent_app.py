@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
 import sys
 import threading
@@ -157,3 +158,28 @@ def test_enrolled_node_never_confirmed_lends_nothing_while_offline(tmp_path):
     finally:
         stop.set()
         thread.join(timeout=15)
+
+
+def test_isolation_selftest_requested_through_the_agent_diagnostic_path(tmp_path):
+    """The same file-request path the installed service uses. Here the agent runs as
+    the current user, NOT as LocalSystem in session 0: that run is
+    tools/acceptance/m2_isolation_service_acceptance.ps1 (elevated)."""
+    stop = threading.Event()
+    app = AgentApp(tmp_path, stop=stop, helper_channel=False)
+    thread = threading.Thread(target=app.run)
+    thread.start()
+    try:
+        (tmp_path / "diagnostics").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "diagnostics" / "isolation-request").touch()
+        result = tmp_path / "diagnostics" / "isolation-result.json"
+        assert _wait(result.exists, timeout=180), "the agent did not run the self-test"
+        report = json.loads(result.read_text("utf-8"))
+        failed = [c for c in report.get("checks", []) if not c["pass"]]
+        assert report["passed"], failed or report
+        assert report["agent_identity"]["pid"] == os.getpid()
+        assert report["agent_identity"]["session_id"] != 0  # honest: not the service
+        names = {c["name"] for c in report["capabilities"]}
+        assert {"appcontainer", "mxc_processcontainer"} <= names
+    finally:
+        stop.set()
+        thread.join(timeout=30)

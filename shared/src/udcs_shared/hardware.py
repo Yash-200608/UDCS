@@ -70,6 +70,16 @@ class GpuInfo(_Contract):
     )
 
 
+class IsolationCapability(_Contract):
+    """What this node itself measured. Nodes differ (build, edition, virtualisation), so
+    the controller never assumes a capability that a node has not reported."""
+
+    name: str = Field(pattern=r"^[a-z0-9_]{1,32}$")  # e.g. appcontainer, mxc_processcontainer
+    available: bool = Field(description="usable by UDCS on this node now")
+    verified: bool = Field(default=False, description="a real launch succeeded, not just present")
+    detail: str = Field(default="", max_length=200)
+
+
 class HardwareInventory(_Contract):
     agent_version: str = Field(max_length=32)
     os: OsInfo
@@ -83,6 +93,7 @@ class HardwareInventory(_Contract):
         max_length=512,
         description="Why GPU discovery failed or found nothing, if it did (e.g. NVML missing)",
     )
+    isolation: list[IsolationCapability] = Field(default_factory=list, max_length=16)
 
     def fingerprint(self) -> str:
         """Stable SHA-256 over the canonical JSON form.

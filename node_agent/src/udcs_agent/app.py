@@ -75,7 +75,12 @@ class AgentApp:
         nvml = Nvml()
         nvml.ensure_started()
         reports = HelperReports()
-        workloads = self.workloads = WorkloadManager(self.data_dir)
+        isolation = None
+        if IS_WINDOWS:
+            from udcs_agent.workloads.isolation import AppContainerIsolation
+
+            isolation = AppContainerIsolation(self.data_dir)
+        workloads = self.workloads = WorkloadManager(self.data_dir, isolation=isolation)
         holder: dict[str, Governor] = {}
         monitor = InteractiveMonitor(
             reports, idle_after_seconds=lambda: holder["g"].policy.idle_after_seconds
@@ -186,8 +191,29 @@ class AgentApp:
             has_gpu=any(g.vendor == "nvidia" for g in inventory.gpus),
             max_jobs=self._max_jobs,
             checkpoint_upload_seconds=self._checkpoint_upload_seconds,
+            isolation="host",  # until detection below has measured this node
         )
         client = self._client
+        capabilities: list = []
+
+        def detect() -> None:
+            """Measure this node's isolation once, on this thread (not the governor's)."""
+            from udcs_agent.diagnostics.isolation import detect_isolation
+
+            try:
+                capabilities[:] = detect_isolation(self.data_dir)
+            except Exception:
+                logger.exception("isolation detection failed; using host isolation only")
+                capabilities[:] = []
+            verified = any(c.name == "appcontainer" and c.verified for c in capabilities)
+            jobs.set_isolation("appcontainer" if verified else "host")
+            logger.info(
+                "isolation capabilities",
+                extra={"capabilities": [c.model_dump() for c in capabilities]},
+            )
+
+        def inventory_now():
+            return collect_inventory(nvml).model_copy(update={"isolation": list(capabilities)})
 
         def sync_jobs(response: HeartbeatResponse) -> None:
             # Reports always go out (progress, results, cancellations). New work is only
@@ -196,7 +222,7 @@ class AgentApp:
 
         runner = AgentRunner(
             self._client,
-            inventory_source=lambda: collect_inventory(nvml),
+            inventory_source=inventory_now,
             telemetry_source=telemetry.collect,
             stop_event=self.stop,
             on_response=self._on_response,
@@ -204,6 +230,7 @@ class AgentApp:
         )
 
         def run() -> None:
+            detect()
             reason = runner.run()
             if reason is ExitReason.CREDENTIAL_REJECTED:
                 # Revoked or unknown: stop lending resources, but keep protecting locally.
@@ -284,8 +311,13 @@ class AgentApp:
     # -- diagnostics (experiment E1), requested by IT via a file in the protected data dir ---
 
     def _check_diagnostics_request(self) -> None:
+        if self._diagnostic and self._diagnostic.is_alive():
+            return
+        if (self.data_dir / "diagnostics" / "isolation-request").exists():
+            self._start_isolation_selftest()
+            return
         request = self.data_dir / "diagnostics" / "gpu-request"
-        if not request.exists() or (self._diagnostic and self._diagnostic.is_alive()):
+        if not request.exists():
             return
         request.unlink(missing_ok=True)
         workdir = self.data_dir / "diagnostics"
@@ -306,3 +338,49 @@ class AgentApp:
 
         self._diagnostic = threading.Thread(target=run, name="udcs-diagnostic", daemon=True)
         self._diagnostic.start()
+
+    def _start_isolation_selftest(self) -> None:
+        """Admin-requested (a file in the protected data dir): run the isolation self-test
+        from *this* process, i.e. from the real service (LocalSystem, session 0)."""
+        workdir = self.data_dir / "diagnostics"
+        (workdir / "isolation-request").unlink(missing_ok=True)
+
+        def run() -> None:
+            from udcs_agent.diagnostics.isolation import detect_isolation, run_selftest
+            from udcs_agent.workloads.isolation import AppContainerIsolation
+
+            try:
+                report = run_selftest(
+                    workdir / "isolation",
+                    AppContainerIsolation(self.data_dir),
+                    credential_file=self.data_dir / CREDENTIAL_FILENAME,
+                )
+                report["capabilities"] = [c.model_dump() for c in detect_isolation(self.data_dir)]
+            except Exception as exc:  # noqa: BLE001 -- a diagnostic must never take the agent down
+                report = {"passed": False, "error": f"{type(exc).__name__}: {exc}"}
+            report["agent_identity"] = _identity()
+            (workdir / "isolation-result.json").write_text(
+                json.dumps(report, indent=1), encoding="utf-8"
+            )
+            logger.info("isolation self-test written", extra={"passed": report.get("passed")})
+
+        self._diagnostic = threading.Thread(target=run, name="udcs-diagnostic", daemon=True)
+        self._diagnostic.start()
+
+
+def _identity() -> dict:
+    """Who and where the agent runs (the service must show SYSTEM in session 0)."""
+    import psutil
+
+    info: dict = {"pid": os.getpid()}
+    try:
+        info["user"] = psutil.Process().username()
+    except Exception:  # noqa: BLE001
+        info["user"] = None
+    if IS_WINDOWS:
+        import ctypes
+
+        session = ctypes.c_ulong()
+        if ctypes.windll.kernel32.ProcessIdToSessionId(os.getpid(), ctypes.byref(session)):
+            info["session_id"] = session.value
+    return info

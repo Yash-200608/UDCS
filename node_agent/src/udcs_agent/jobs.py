@@ -84,11 +84,14 @@ class JobSync:
         has_gpu: bool,
         max_jobs: int = 2,
         checkpoint_upload_seconds: float = 15.0,
+        isolation: str = "host",
         clock: Callable[[], float] = time.monotonic,
         wall_clock: Callable[[], float] = time.time,
     ) -> None:
         self.data_dir = data_dir
         self._upload_every = checkpoint_upload_seconds
+        # Measured on this node at start-up: "appcontainer" only if a real launch passed.
+        self._isolation = isolation
         self._uploaded_units: dict[str, int] = {}  # per job, this process
         self._last_upload: dict[str, float] = {}
         self._notes: dict[str, list[str]] = {}  # extra log lines for the next report
@@ -121,6 +124,10 @@ class JobSync:
         tmp = self._path.with_suffix(".tmp")
         tmp.write_text(json.dumps(self._assignments, indent=1), encoding="utf-8")
         os.replace(tmp, self._path)
+
+    def set_isolation(self, level: str) -> None:
+        """Applies to jobs accepted from now on; running jobs keep the level they began with."""
+        self._isolation = level
 
     @property
     def job_ids(self) -> list[str]:
@@ -284,6 +291,7 @@ class JobSync:
                 "attempt": assignment.attempt,
                 "spec": assignment.spec.model_dump(mode="json"),
                 "added_at": self._wall(),
+                "isolation": self._isolation,
             }
             if assignment.checkpoint is not None:
                 # Resume elsewhere-made progress: fetch and verify before the workload exists.
@@ -292,7 +300,9 @@ class JobSync:
             self._save()  # persisted before the workload exists
             if "resume" not in entry:
                 self._queue_add(key, entry)
-            logger.info("job %s accepted (%s)", key, assignment.spec.kind.value)
+            logger.info(
+                "job %s accepted (%s, %s)", key, assignment.spec.kind.value, self._isolation
+            )
 
     def _queue_add(self, job_id: str, entry: dict[str, Any]) -> None:
         spec = entry["spec"]
@@ -304,6 +314,7 @@ class JobSync:
                 kind=spec["kind"],
                 total_units=int(spec["total_units"]),
                 memory_mb=int(spec["memory_mb"]),
+                isolation=str(entry.get("isolation", "host")),
             ),
         )
         entry["added_at"] = self._wall()

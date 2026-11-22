@@ -1,0 +1,499 @@
+"""AppContainer (lowbox) process isolation via Win32, for UDCS workloads.
+
+How the boundary works (Windows access checks; verified by the probe tests, not assumed):
+- An AppContainer process carries a *package SID* plus capability SIDs, and runs at
+  low integrity. Every access check is made twice: once for the normal token, and
+  once requiring that the object also grants the package SID, a capability the token
+  holds, or ALL APPLICATION PACKAGES. Student profiles, the agent's data directory
+  and other users' objects grant none of these, so access is denied by default.
+- LPAC ("less privileged AppContainer", ALL_APPLICATION_PACKAGES opt-out) also ignores
+  ALL APPLICATION PACKAGES grants, so only explicitly granted paths are reachable,
+  plus the system files Windows grants to ALL RESTRICTED APPLICATION PACKAGES.
+- No network capability is granted: no internet, no private network, no loopback.
+- The token is first restricted (DISABLE_MAX_PRIVILEGE, Administrators deny-only), so
+  the workload holds no privilege of its parent. That matters when the parent is
+  the LocalSystem service.
+
+Each workload gets its own AppContainer profile, and therefore its own package SID,
+so workloads cannot read each other's directories. A shared *capability* SID grants
+read/execute on the runtime (interpreter and catalog code) only.
+"""
+
+from __future__ import annotations
+
+import ctypes
+import subprocess
+from ctypes import wintypes
+from dataclasses import dataclass
+from pathlib import Path
+
+from udcs_agent.winplat import api
+from udcs_agent.winplat.jobs import JobObject
+from udcs_agent.winplat.launch import LaunchedProcess, _environment_block
+
+_userenv = ctypes.WinDLL("userenv", use_last_error=True)
+_advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+_kernelbase = ctypes.WinDLL("kernelbase", use_last_error=True)
+_kernel32 = api.kernel32
+
+PSID = ctypes.c_void_p
+RUNTIME_CAPABILITY = "udcsWorkloadRuntime"
+
+PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES = 0x00020009
+PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY = 0x0002000F
+PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT = 0x01
+EXTENDED_STARTUPINFO_PRESENT = 0x00080000
+SE_GROUP_ENABLED = 0x00000004
+DISABLE_MAX_PRIVILEGE = 0x1
+TOKEN_ALL_NEEDED = 0x0001 | 0x0002 | 0x0008 | 0x0080 | 0x0100  # assign, dup, query, adj default
+E_ALREADY_EXISTS = ctypes.c_long(0x800700B7).value
+E_NOT_FOUND = ctypes.c_long(0x80070002).value
+JobObjectBasicUIRestrictions = 4
+UI_RESTRICT_ALL = 0xFF  # handles, clipboard r/w, system params, display, atoms, desktop, exit
+READ_EXECUTE = 0x001200A9  # FILE_GENERIC_READ | FILE_GENERIC_EXECUTE
+MODIFY = 0x001301BF  # read, write, execute, delete (no WRITE_DAC / WRITE_OWNER)
+INHERITED_ACE = 0x10
+
+
+class SID_AND_ATTRIBUTES(ctypes.Structure):
+    _fields_ = [("Sid", PSID), ("Attributes", wintypes.DWORD)]
+
+
+class SECURITY_CAPABILITIES(ctypes.Structure):
+    _fields_ = [
+        ("AppContainerSid", PSID),
+        ("Capabilities", ctypes.POINTER(SID_AND_ATTRIBUTES)),
+        ("CapabilityCount", wintypes.DWORD),
+        ("Reserved", wintypes.DWORD),
+    ]
+
+
+class STARTUPINFOEXW(ctypes.Structure):
+    _fields_ = [("StartupInfo", api.STARTUPINFOW), ("lpAttributeList", ctypes.c_void_p)]
+
+
+class JOBOBJECT_BASIC_UI_RESTRICTIONS(ctypes.Structure):
+    _fields_ = [("UIRestrictionsClass", wintypes.DWORD)]
+
+
+def _proto(fn, restype, *argtypes):
+    fn.restype = restype
+    fn.argtypes = list(argtypes)
+
+
+_proto(
+    _userenv.CreateAppContainerProfile,
+    ctypes.c_long,
+    wintypes.LPCWSTR,
+    wintypes.LPCWSTR,
+    wintypes.LPCWSTR,
+    ctypes.POINTER(SID_AND_ATTRIBUTES),
+    wintypes.DWORD,
+    ctypes.POINTER(PSID),
+)
+_proto(
+    _userenv.DeriveAppContainerSidFromAppContainerName,
+    ctypes.c_long,
+    wintypes.LPCWSTR,
+    ctypes.POINTER(PSID),
+)
+_proto(_userenv.DeleteAppContainerProfile, ctypes.c_long, wintypes.LPCWSTR)
+_proto(
+    _kernelbase.DeriveCapabilitySidsFromName,
+    wintypes.BOOL,
+    wintypes.LPCWSTR,
+    ctypes.POINTER(ctypes.POINTER(PSID)),
+    ctypes.POINTER(wintypes.DWORD),
+    ctypes.POINTER(ctypes.POINTER(PSID)),
+    ctypes.POINTER(wintypes.DWORD),
+)
+_proto(_advapi.ConvertSidToStringSidW, wintypes.BOOL, PSID, ctypes.POINTER(wintypes.LPWSTR))
+_proto(_advapi.ConvertStringSidToSidW, wintypes.BOOL, wintypes.LPCWSTR, ctypes.POINTER(PSID))
+_proto(_advapi.FreeSid, ctypes.c_void_p, PSID)
+_proto(
+    _advapi.OpenProcessToken,
+    wintypes.BOOL,
+    wintypes.HANDLE,
+    wintypes.DWORD,
+    ctypes.POINTER(wintypes.HANDLE),
+)
+_proto(
+    _advapi.CreateRestrictedToken,
+    wintypes.BOOL,
+    wintypes.HANDLE,
+    wintypes.DWORD,
+    wintypes.DWORD,
+    ctypes.POINTER(SID_AND_ATTRIBUTES),
+    wintypes.DWORD,
+    ctypes.c_void_p,
+    wintypes.DWORD,
+    ctypes.c_void_p,
+    ctypes.POINTER(wintypes.HANDLE),
+)
+_proto(
+    _advapi.CreateProcessAsUserW,
+    wintypes.BOOL,
+    wintypes.HANDLE,
+    wintypes.LPCWSTR,
+    wintypes.LPWSTR,
+    ctypes.c_void_p,
+    ctypes.c_void_p,
+    wintypes.BOOL,
+    wintypes.DWORD,
+    ctypes.c_void_p,
+    wintypes.LPCWSTR,
+    ctypes.c_void_p,
+    ctypes.POINTER(api.PROCESS_INFORMATION),
+)
+_proto(
+    _kernel32.InitializeProcThreadAttributeList,
+    wintypes.BOOL,
+    ctypes.c_void_p,
+    wintypes.DWORD,
+    wintypes.DWORD,
+    ctypes.POINTER(ctypes.c_size_t),
+)
+_proto(
+    _kernel32.UpdateProcThreadAttribute,
+    wintypes.BOOL,
+    ctypes.c_void_p,
+    wintypes.DWORD,
+    ctypes.c_size_t,
+    ctypes.c_void_p,
+    ctypes.c_size_t,
+    ctypes.c_void_p,
+    ctypes.c_void_p,
+)
+_proto(_kernel32.DeleteProcThreadAttributeList, None, ctypes.c_void_p)
+_proto(_kernel32.LocalFree, ctypes.c_void_p, ctypes.c_void_p)
+_proto(_kernel32.GetCurrentProcess, wintypes.HANDLE)
+_proto(
+    _kernel32.SetInformationJobObject,
+    wintypes.BOOL,
+    wintypes.HANDLE,
+    ctypes.c_int,
+    ctypes.c_void_p,
+    wintypes.DWORD,
+)
+
+
+class AppContainerError(OSError):
+    pass
+
+
+def _hr_check(hr: int, what: str) -> None:
+    if hr != 0:
+        code = hr & 0xFFFFFFFF
+        raise AppContainerError(code, f"{what} failed: HRESULT 0x{code:08X}")
+
+
+def sid_to_string(sid: int) -> str:
+    out = wintypes.LPWSTR()
+    api.check(_advapi.ConvertSidToStringSidW(sid, ctypes.byref(out)), "ConvertSidToStringSidW")
+    try:
+        return out.value or ""
+    finally:
+        _kernel32.LocalFree(out)
+
+
+class _Sid:
+    """A PSID owned by us (freed with LocalFree)."""
+
+    def __init__(self, text: str) -> None:
+        self.ptr = PSID()
+        api.check(_advapi.ConvertStringSidToSidW(text, ctypes.byref(self.ptr)), "ConvertStringSid")
+
+    def close(self) -> None:
+        if self.ptr:
+            _kernel32.LocalFree(self.ptr)
+            self.ptr = PSID()
+
+
+# -- profiles and SIDs ----------------------------------------------------------------------
+
+
+def ensure_profile(name: str) -> str:
+    """Create (or reuse) the AppContainer profile `name`; return its package SID."""
+    sid = PSID()
+    hr = _userenv.CreateAppContainerProfile(name, name, "UDCS workload", None, 0, ctypes.byref(sid))
+    if hr == E_ALREADY_EXISTS:
+        _hr_check(
+            _userenv.DeriveAppContainerSidFromAppContainerName(name, ctypes.byref(sid)),
+            "DeriveAppContainerSidFromAppContainerName",
+        )
+    else:
+        _hr_check(hr, "CreateAppContainerProfile")
+    try:
+        return sid_to_string(sid.value)
+    finally:
+        _advapi.FreeSid(sid)
+
+
+def delete_profile(name: str) -> None:
+    hr = _userenv.DeleteAppContainerProfile(name)
+    if hr not in (0, E_NOT_FOUND):
+        _hr_check(hr, "DeleteAppContainerProfile")
+
+
+def list_profiles(prefix: str) -> list[str]:
+    """AppContainer profiles of the current user whose name starts with `prefix`.
+    DeleteAppContainerProfile reports success even for unknown names, so this registry
+    mapping is the reliable way to see which profiles exist."""
+    import winreg
+
+    key = (
+        r"Software\Classes\Local Settings\Software\Microsoft\Windows"
+        r"\CurrentVersion\AppContainer\Mappings"
+    )
+    names: list[str] = []
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key) as mappings:
+            for i in range(winreg.QueryInfoKey(mappings)[0]):
+                with winreg.OpenKey(mappings, winreg.EnumKey(mappings, i)) as entry:
+                    try:
+                        moniker = winreg.QueryValueEx(entry, "Moniker")[0]
+                    except OSError:
+                        continue
+                if isinstance(moniker, str) and moniker.startswith(prefix):
+                    names.append(moniker)
+    except OSError:
+        return []
+    return sorted(names)
+
+
+def capability_sid(name: str) -> str:
+    """The capability SID Windows derives from a capability name (stable per name)."""
+    groups = ctypes.POINTER(PSID)()
+    caps = ctypes.POINTER(PSID)()
+    n_groups, n_caps = wintypes.DWORD(), wintypes.DWORD()
+    api.check(
+        _kernelbase.DeriveCapabilitySidsFromName(
+            name,
+            ctypes.byref(groups),
+            ctypes.byref(n_groups),
+            ctypes.byref(caps),
+            ctypes.byref(n_caps),
+        ),
+        "DeriveCapabilitySidsFromName",
+    )
+    try:
+        if n_caps.value < 1:
+            raise AppContainerError(0, f"no capability SID derived for {name!r}")
+        return sid_to_string(caps[0])
+    finally:
+        for array, count in ((groups, n_groups.value), (caps, n_caps.value)):
+            for i in range(count):
+                _kernel32.LocalFree(array[i])
+            _kernel32.LocalFree(array)
+
+
+# -- filesystem grants ----------------------------------------------------------------------
+
+
+def grant(path: Path, sid: str, access: int) -> None:
+    """Add an inheritable allow ACE for `sid` on `path` (directory or file)."""
+    import ntsecuritycon as con
+    import win32security as ws
+
+    flags = (con.OBJECT_INHERIT_ACE | con.CONTAINER_INHERIT_ACE) if path.is_dir() else 0
+    sd = ws.GetNamedSecurityInfo(str(path), ws.SE_FILE_OBJECT, ws.DACL_SECURITY_INFORMATION)
+    dacl = sd.GetSecurityDescriptorDacl()
+    target = ws.ConvertStringSidToSid(sid)
+    for i in range(dacl.GetAceCount()):
+        (_ace_type, ace_flags), mask, ace_sid = dacl.GetAce(i)
+        if ace_sid == target and mask == access and not ace_flags & INHERITED_ACE:
+            return  # already granted
+    dacl.AddAccessAllowedAceEx(ws.ACL_REVISION_DS, flags, access, target)
+    ws.SetNamedSecurityInfo(
+        str(path), ws.SE_FILE_OBJECT, ws.DACL_SECURITY_INFORMATION, None, None, dacl, None
+    )
+
+
+def revoke(path: Path, sid: str) -> None:
+    """Remove every explicit ACE for `sid` from `path` (inherited copies follow)."""
+    import win32security as ws
+
+    if not path.exists():
+        return
+    sd = ws.GetNamedSecurityInfo(str(path), ws.SE_FILE_OBJECT, ws.DACL_SECURITY_INFORMATION)
+    dacl = sd.GetSecurityDescriptorDacl()
+    target = ws.ConvertStringSidToSid(sid)
+    changed = False
+    for i in reversed(range(dacl.GetAceCount())):
+        (_ace_type, ace_flags), _mask, ace_sid = dacl.GetAce(i)
+        if ace_sid == target and not ace_flags & INHERITED_ACE:
+            dacl.DeleteAce(i)
+            changed = True
+    if changed:
+        ws.SetNamedSecurityInfo(
+            str(path), ws.SE_FILE_OBJECT, ws.DACL_SECURITY_INFORMATION, None, None, dacl, None
+        )
+
+
+# -- launch ------------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class SandboxSpec:
+    package_sid: str
+    capability_sids: tuple[str, ...] = ()
+    lpac: bool = True  # also ignore ALL APPLICATION PACKAGES grants
+
+
+def _restricted_token() -> wintypes.HANDLE:
+    own = wintypes.HANDLE()
+    api.check(
+        _advapi.OpenProcessToken(
+            _kernel32.GetCurrentProcess(), TOKEN_ALL_NEEDED, ctypes.byref(own)
+        ),
+        "OpenProcessToken",
+    )
+    admins = _Sid("S-1-5-32-544")
+    try:
+        disable = (SID_AND_ATTRIBUTES * 1)(SID_AND_ATTRIBUTES(admins.ptr, 0))
+        restricted = wintypes.HANDLE()
+        api.check(
+            _advapi.CreateRestrictedToken(
+                own, DISABLE_MAX_PRIVILEGE, 1, disable, 0, None, 0, None, ctypes.byref(restricted)
+            ),
+            "CreateRestrictedToken",
+        )
+        return restricted
+    finally:
+        admins.close()
+        api.CloseHandle(own)
+
+
+def set_ui_restrictions(job: JobObject) -> None:
+    """No clipboard, desktop, global atoms or handles of other processes' windows."""
+    limits = JOBOBJECT_BASIC_UI_RESTRICTIONS(UI_RESTRICT_ALL)
+    api.check(
+        _kernel32.SetInformationJobObject(
+            job.handle, JobObjectBasicUIRestrictions, ctypes.byref(limits), ctypes.sizeof(limits)
+        ),
+        "SetInformationJobObject(UI restrictions)",
+    )
+
+
+def launch_in_appcontainer(
+    argv: list[str],
+    job: JobObject,
+    sandbox: SandboxSpec,
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    memory_priority: int = api.MEMORY_PRIORITY_VERY_LOW,
+) -> LaunchedProcess:
+    """Create the process suspended, inside the AppContainer *and* the job, then resume.
+    Any failure raises: there is no fallback to an unrestricted process."""
+    if not argv or not Path(argv[0]).is_absolute():
+        raise ValueError("argv[0] must be an absolute executable path (no PATH search)")
+    # Windows derives the container's own folder from these. Without them process creation
+    # fails with ERROR_ENVVAR_NOT_FOUND (203), measured on build 22000. They name the
+    # *parent's* profile; the container still cannot access it (no grant to its SID).
+    import os
+
+    env = dict(env)
+    for key in ("USERPROFILE", "LOCALAPPDATA"):
+        if key not in env and key in os.environ:
+            env[key] = os.environ[key]
+    package = _Sid(sandbox.package_sid)
+    caps = [_Sid(s) for s in sandbox.capability_sids]
+    token = _restricted_token()
+    attr_list = None
+    info = api.PROCESS_INFORMATION()
+    try:
+        cap_array = (SID_AND_ATTRIBUTES * max(1, len(caps)))(
+            *[SID_AND_ATTRIBUTES(c.ptr, SE_GROUP_ENABLED) for c in caps]
+        )
+        security = SECURITY_CAPABILITIES(package.ptr, cap_array if caps else None, len(caps), 0)
+        opt_out = wintypes.DWORD(PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT)
+        count = 2 if sandbox.lpac else 1
+        size = ctypes.c_size_t()
+        _kernel32.InitializeProcThreadAttributeList(None, count, 0, ctypes.byref(size))
+        attr_list = ctypes.create_string_buffer(size.value)
+        api.check(
+            _kernel32.InitializeProcThreadAttributeList(attr_list, count, 0, ctypes.byref(size)),
+            "InitializeProcThreadAttributeList",
+        )
+        api.check(
+            _kernel32.UpdateProcThreadAttribute(
+                attr_list,
+                0,
+                PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
+                ctypes.byref(security),
+                ctypes.sizeof(security),
+                None,
+                None,
+            ),
+            "UpdateProcThreadAttribute(security capabilities)",
+        )
+        if sandbox.lpac:
+            api.check(
+                _kernel32.UpdateProcThreadAttribute(
+                    attr_list,
+                    0,
+                    PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY,
+                    ctypes.byref(opt_out),
+                    ctypes.sizeof(opt_out),
+                    None,
+                    None,
+                ),
+                "UpdateProcThreadAttribute(LPAC)",
+            )
+        startup = STARTUPINFOEXW()
+        startup.StartupInfo.cb = ctypes.sizeof(startup)
+        startup.lpAttributeList = ctypes.cast(attr_list, ctypes.c_void_p)
+        command_line = ctypes.create_unicode_buffer(subprocess.list2cmdline(argv))
+        block = _environment_block(env)
+        flags = (
+            api.CREATE_SUSPENDED
+            | api.CREATE_NO_WINDOW
+            | api.CREATE_NEW_PROCESS_GROUP
+            | api.CREATE_UNICODE_ENVIRONMENT
+            | api.IDLE_PRIORITY_CLASS
+            | EXTENDED_STARTUPINFO_PRESENT
+        )
+        api.check(
+            _advapi.CreateProcessAsUserW(
+                token,
+                argv[0],
+                command_line,
+                None,
+                None,
+                False,  # no handle inheritance
+                flags,
+                ctypes.cast(block, ctypes.c_void_p),
+                str(cwd),
+                ctypes.byref(startup),
+                ctypes.byref(info),
+            ),
+            "CreateProcessAsUserW(AppContainer)",
+        )
+    finally:
+        if attr_list is not None:
+            _kernel32.DeleteProcThreadAttributeList(attr_list)
+        api.CloseHandle(token)
+        package.close()
+        for c in caps:
+            c.close()
+    try:
+        job.assign(info.hProcess)
+        api.SetProcessPriorityBoost(info.hProcess, True)
+        priority = api.MEMORY_PRIORITY_INFORMATION(memory_priority)
+        api.SetProcessInformation(
+            info.hProcess,
+            api.ProcessMemoryPriority,
+            ctypes.byref(priority),
+            ctypes.sizeof(priority),
+        )
+        if api.ResumeThread(info.hThread) == 0xFFFFFFFF:
+            raise api.WinApiError("ResumeThread")
+    except BaseException:
+        api.TerminateProcess(info.hProcess, 1)
+        api.TerminateJobObject(job.handle, 1)
+        api.CloseHandle(info.hProcess)
+        raise
+    finally:
+        api.CloseHandle(info.hThread)
+    return LaunchedProcess(pid=int(info.dwProcessId), handle=info.hProcess)

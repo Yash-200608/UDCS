@@ -17,7 +17,7 @@ user ──POST /jobs──▶ controller (jobs table)
 
 Only the **built-in catalog**: the `cpu`, `memory`, `disk` and `gpu` synthetic workloads, with bounded parameters (`total_units` ≤ 10⁷, `memory_mb` ≤ 4096).
 - **No user code.** A job request cannot carry code, a command line, paths or environment. An unknown `kind` is a validation error.
-- **Why.** Arbitrary code stays blocked until an isolation model is approved (D-3, threat T10).
+- **Why.** Arbitrary code stays blocked until the [ADR 0001](../decisions/0001-workload-isolation.md) gate passes. Catalog workloads already run inside a per-workload AppContainer wherever the node has verified that backend, and on the host (Job Object only) elsewhere. The level is recorded in each job's log (`started (appcontainer)`).
 
 ## Who decides what
 

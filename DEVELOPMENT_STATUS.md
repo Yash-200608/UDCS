@@ -9,7 +9,7 @@ _Last updated: 2026-11-22. Development checkpoint on branch `feature/udcs-backgr
 | M1: Working Foundation | **Met**, verified live over TLS on one Windows 11 PC. The "no terminal" gap is now covered by the M1.5 service, which is not yet verified as a service. |
 | M1.5: Background Service & Local Resource Protection | **Implemented. Tested without admin rights. NOT accepted.** Six acceptance gates are still open (see below). Report: [docs/acceptance/milestone-1.5.md](docs/acceptance/milestone-1.5.md) |
 | M2a: Distributed execution pipeline (catalog workloads only) | **Implemented and tested** on one PC with two agent instances: controller → scheduler → agent → Job Object workload → telemetry → verified result, plus recovery. See [execution-pipeline.md](docs/architecture/execution-pipeline.md) |
-| M2b: User-supplied code | **Not started; blocked on D-3 (isolation).** No path exists for running user code |
+| M2b: Isolation for workloads (D-3) | **Decided: [ADR 0001](docs/decisions/0001-workload-isolation.md). Native AppContainer backend implemented and tested; the catalog runs inside it where a node verifies it.** User code is still **disabled**: the service-path gate (elevated) is open |
 
 ## Status legend
 
@@ -81,7 +81,7 @@ _Last updated: 2026-11-22. Development checkpoint on branch `feature/udcs-backgr
 | Pipeline under the real Windows service (SYSTEM, session 0) | **unverified** | part of the elevated M1.5 acceptance |
 | Separate physical machines, real power-off, clock skew | **unverified** | — |
 | Checkpoint migration between nodes; preemption; predictive availability; quotas beyond the per-user limit | pending | — |
-| User-supplied code (containers or sandbox) | **blocked** on D-3 | — |
+| User-supplied code | **disabled**: the isolation backend exists, and the gate (service-path acceptance, ALL APPLICATION PACKAGES review, packaging design) is open | ADR 0001 |
 
 Test run, 2026-11-22 (local, Windows 11): **204 passed and 15 skipped** (the PostgreSQL race tests skip on SQLite), and ruff is clean.
 - **Intermittent failures.** In an earlier full run, `test_memory_class_is_paused_while_a_student_is_active` and the e2e cancel test each failed once. Neither reproduced in isolated reruns (3×) or in the next full run.
@@ -121,6 +121,34 @@ Bugs found and fixed while building it:
 - integrity for user workloads (D-3);
 - forgery by a dishonest node (T26/T29).
 
+### Workload isolation (D-3, 2026-11-22)
+
+Decision: [ADR 0001](docs/decisions/0001-workload-isolation.md).
+
+**MXC v1.1.0** (`wxc-exec.exe`) cannot run on this fleet's build 22000. Its ProcessContainer needs 24H2 (26100+), and v1.1.0 removed the legacy fallbacks. It is detected and reported per node, but not integrated.
+
+**Chosen:** a native AppContainer backend in the agent.
+
+| Component | State | Evidence |
+|---|---|---|
+| `winplat/appcontainer.py`: per-workload AppContainer profiles, restricted token (no privileges, Administrators deny-only), no network capability, process created suspended inside the existing Job Object, UI restrictions, ACL grants and revokes, profile listing | tested | `test_isolation_windows.py` (14) |
+| `workloads/isolation.py`: adapter with a runtime capability SID, a minimal runtime copy (checked and repaired on every launch), per-workload grants (own workdir: modify; inputs: read/execute), crash traceback to `workload-error.txt`, per-agent scoped profile names, orphan sweep | tested | same |
+| No fallback: required isolation missing, or launch failure → workload FAILED, nothing started | tested | same |
+| Four catalog workloads (cpu, memory, disk, **gpu/CUDA**) completing inside AppContainer, with governor pause and Job Object accounting intact | tested on the GT 730 | same |
+| Isolation self-test: 18 operations (allowed vs prohibited), token, environment, process-tree kill, each with an unsandboxed control | **passed as the interactive user** | `test_isolation_selftest_denies_every_prohibited_operation`; the `AgentApp` request-file path (`test_agent_app.py`) |
+| Per-node capability detection reported in inventory (`isolation`: appcontainer, lpac, mxc, windows_sandbox, hyperv, wsl) | tested | `test_detection_reports_a_verified_appcontainer` |
+| **Self-test from the installed service (LocalSystem, session 0)** | **not run; needs elevation** | `tools/acceptance/m2_isolation_service_acceptance.ps1` |
+| LPAC (stricter) | not used: Python fails at start (0xC0000022) on build 22000 | detection reports it |
+
+**Bugs found on the way:**
+- `synthetic.py` passed an invalid 32-bit handle to `SetPriorityClass`. Windows ignored it on the host, so **background mode was never applied before**; inside AppContainer it crashed.
+- The self-test's unsandboxed control wrote into the shared runtime, which would have broken every later isolated job on a node.
+- `DeleteAppContainerProfile` reports success for unknown profiles. Leaks are now checked through the registry mapping and swept.
+
+**Measured costs:**
+- AppContainer process start is about 0.12 s for Python, and the detection launch takes about 0.6 s;
+- the one-time grant on the interpreter directory takes 41.6 s per node.
+
 ### M2a engineering review
 
 **Achieved and verified:**
@@ -143,7 +171,7 @@ Bugs found and fixed while building it:
 1. The elevated service acceptance, now including the pipeline.
 2. ~~A concurrency test of the claim~~: done (PostgreSQL race tests in CI).
 3. ~~Checkpoint migration~~: done (central, verified, fenced).
-4. The D-3 isolation decision, which unblocks user code.
+4. ~~The D-3 isolation decision~~: decided (ADR 0001); user code still gated.
 
 ## Acceptance gates still open for M1.5
 
@@ -206,14 +234,14 @@ Not covered by this run:
 4. Re-enrolling a machine creates a new node record. A node that lies in its inventory is still accepted; verification is planned for M3.
 5. The session helper is a Python process (memory cost; D-2 is open).
 7. **Audit events with equal timestamps have no chronological order.** The listing now breaks ties by id, so the order is deterministic but not chronological. PostgreSQL CI exposed this: SQLite had been returning tied rows in insertion order by accident. The proper fix is a strict sequence column (a schema change, and the basis for T9 hash-chaining). That is a founder decision.
-6. The threat model's T10 (malicious workload escape) is **open**. M2 must not start without an isolation decision.
+6. The threat model's T10 (malicious workload escape) is **reduced, not closed**. AppContainer is not a VM: kernel or driver exploits cross it. User code stays disabled until the ADR 0001 gate passes.
 
 ## Decisions awaiting the founder
 
 | Decision | Status / recommendation |
 |---|---|
 | D-2: native session helper | open |
-| D-3: execution isolation (**blocks M2**) | recommendation: tiered trust, with containers for untrusted workloads |
+| D-3: execution isolation | **decided**: native AppContainer now; MXC for 24H2+ nodes later (ADR 0001) |
 | D-4: power policy | open |
 | Repository license | none chosen |
 | Differentiator versus HTCondor | needs to be written before M3 |

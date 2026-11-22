@@ -158,7 +158,7 @@ def test_jobs_are_distributed_executed_and_verified_across_two_nodes(cluster):
         result = c.http.get(f"/jobs/{job_id}/result", headers=c.user).json()
         assert result["verified"] is True and result["result"]["units"] == 30
         messages = _messages(c, job_id)
-        assert "started" in messages and "completed" in messages  # from the node's governor
+        assert any(m.startswith("started (") for m in messages) and "completed" in messages
         assert messages[-1] == "succeeded: result verified"
     # Acknowledged jobs are cleaned up on the nodes.
     for node in c.nodes:
@@ -193,7 +193,7 @@ def test_agent_restart_resumes_the_same_attempt_from_its_checkpoint(cluster):
     assert job["attempt"] == 1 and job["requeues"] == 0, "resumed, not rescheduled"
     result = c.http.get(f"/jobs/{job_id}/result", headers=c.user).json()
     assert result["verified"] is True  # no unit lost or repeated across the restart
-    assert _messages(c, job_id).count("started") >= 2
+    assert sum(m.startswith("started (") for m in _messages(c, job_id)) >= 2
 
 
 def test_lost_node_job_resumes_on_another_node_from_the_central_checkpoint(cluster):
