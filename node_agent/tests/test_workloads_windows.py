@@ -161,3 +161,34 @@ def test_cli_requests_are_applied_by_the_running_manager(manager, tmp_path):
     _step(manager, L.OPEN)
     assert "queued1" not in manager.states()
     assert not list((tmp_path / "workloads" / "requests").glob("*.json"))
+
+
+def test_purge_removes_a_running_workloads_directory(manager, tmp_path):
+    # Windows will not delete a directory that a just-terminated process still uses as its
+    # working directory; the manager waits for the exit and retries.
+    manager.add(WorkloadSpec(id="job-purge", kind="cpu"))
+    _step(manager, L.OPEN, times=3)
+    assert _wait_for(lambda: manager.status_of("job-purge").get("units_done", 0) > 0)
+    WorkloadManager.queue_request(tmp_path, "remove", workload_id="job-purge", purge=True)
+    _step(manager, L.OPEN, wait=0)
+    assert "job-purge" not in manager.states()
+    assert _wait_for(
+        lambda: (
+            (_step(manager, L.OPEN, wait=0) or True)
+            and not (tmp_path / "workloads" / "job-purge").exists()
+        ),
+        timeout=5,
+    )
+
+
+def test_job_snapshot_keeps_cpu_time_after_the_process_exits(manager):
+    manager.add(WorkloadSpec(id="job-cpu", kind="cpu", total_units=20))
+    assert _wait_for(
+        lambda: (
+            (_step(manager, L.OPEN, wait=0.2) or True)
+            and manager.states()["job-cpu"] == WorkloadState.COMPLETED
+        )
+    )
+    snap = manager.job_snapshot("job-")["job-cpu"]
+    assert snap["state"] == "completed" and snap["cpu_seconds"] > 0
+    assert snap["result"]["units"] == 20

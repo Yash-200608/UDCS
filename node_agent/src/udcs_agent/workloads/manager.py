@@ -11,7 +11,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import sys
+import threading
 import time
 from dataclasses import asdict, dataclass, field
 from enum import StrEnum
@@ -88,6 +90,7 @@ class _Record:
     failures: int = 0
     evictions: int = 0
     last_exit_code: int | None = None
+    cpu_seconds: float = 0.0  # cumulative over every process this workload has had
     history: list[str] = field(default_factory=list)
 
 
@@ -115,6 +118,12 @@ class WorkloadManager:
         # gpu/disk admission: set immediately, clear only after relax_after_seconds of calm
         self._gpu_clear_since: float | None = None
         self._disk_clear_since: float | None = None
+        # The governor thread mutates; other threads (telemetry, job sync) only read, and
+        # only through snapshot methods that take this lock.
+        self._lock = threading.RLock()
+        # Directories to delete. Windows refuses while a just-terminated process still has
+        # the directory as its working directory, so failures are retried every tick.
+        self._purge_pending: set[str] = set()
         self._load_registry()
         self._ingest_requests()
 
@@ -138,7 +147,11 @@ class WorkloadManager:
             if state not in (WorkloadState.COMPLETED, WorkloadState.FAILED):
                 state = WorkloadState.WAITING  # whatever was running died with the old agent
             self._records[spec.id] = _Record(
-                spec, state, failures=item.get("failures", 0), evictions=item.get("evictions", 0)
+                spec,
+                state,
+                failures=item.get("failures", 0),
+                evictions=item.get("evictions", 0),
+                cpu_seconds=float(item.get("cpu_seconds", 0.0)),
             )
 
     def _save_registry(self) -> None:
@@ -149,6 +162,7 @@ class WorkloadManager:
                     "state": r.state.value,
                     "failures": r.failures,
                     "evictions": r.evictions,
+                    "cpu_seconds": round(r.cpu_seconds, 3),
                 }
                 for r in self._records.values()
             ]
@@ -162,17 +176,19 @@ class WorkloadManager:
             logger.warning("could not save workload registry; will retry", exc_info=True)
 
     def add(self, spec: WorkloadSpec) -> None:
-        if spec.id in self._records:
-            raise ValueError(f"workload {spec.id} already exists")
-        self._records[spec.id] = _Record(spec)
-        self._save_registry()
+        with self._lock:
+            if spec.id in self._records:
+                raise ValueError(f"workload {spec.id} already exists")
+            self._records[spec.id] = _Record(spec)
+            self._save_registry()
 
     def remove(self, workload_id: str) -> None:
-        running = self._running.pop(workload_id, None)
-        if running is not None:
-            self._terminate(running)
-        self._records.pop(workload_id, None)
-        self._save_registry()
+        with self._lock:
+            running = self._running.pop(workload_id, None)
+            if running is not None:
+                self._terminate(running)
+            self._records.pop(workload_id, None)
+            self._save_registry()
 
     @property
     def _requests_dir(self) -> Path:
@@ -184,6 +200,8 @@ class WorkloadManager:
         action: str,
         spec: WorkloadSpec | None = None,
         workload_id: str | None = None,
+        *,
+        purge: bool = False,
     ) -> Path:
         """Used by the CLI. The running agent applies queued requests on its next tick, so
         registry.json has exactly one writer (no lost updates)."""
@@ -196,7 +214,10 @@ class WorkloadManager:
             body["spec"] = {**asdict(spec), "kind": spec.kind.value}
         if workload_id is not None:
             body["id"] = workload_id
-        path = requests / f"{_uuid.uuid4().hex}.json"
+        if purge:
+            body["purge"] = True  # also delete the workload's directory (checkpoint, result)
+        # Names sort in submission order (a remove followed by an add must apply in order).
+        path = requests / f"{time.time_ns():020d}-{_uuid.uuid4().hex}.json"
         tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps(body), encoding="utf-8")
         os.replace(tmp, path)
@@ -204,7 +225,7 @@ class WorkloadManager:
 
     def _ingest_requests(self) -> None:
         try:
-            pending = sorted(self._requests_dir.glob("*.json"), key=lambda q: q.stat().st_mtime)
+            pending = sorted(self._requests_dir.glob("*.json"), key=lambda q: q.name)
         except OSError:
             return
         for path in pending:
@@ -215,17 +236,67 @@ class WorkloadManager:
                     if spec.id not in self._records:
                         self._records[spec.id] = _Record(spec)
                 elif body["action"] == "remove":
-                    running = self._running.pop(str(body["id"]), None)
+                    workload_id = WorkloadSpec(id=str(body["id"]), kind="cpu").id  # validated
+                    running = self._running.pop(workload_id, None)
                     if running is not None:
-                        self._terminate(running)
-                    self._records.pop(str(body["id"]), None)
+                        self._terminate(running, wait_seconds=2.0 if body.get("purge") else 0)
+                    self._records.pop(workload_id, None)
+                    if body.get("purge"):
+                        self._purge_pending.add(workload_id)
                 self._dirty = True
             except (ValueError, KeyError, TypeError, OSError):
                 logger.warning("ignoring malformed workload request %s", path.name)
             path.unlink(missing_ok=True)
+        self._purge()
+
+    def _purge(self) -> None:
+        for workload_id in list(self._purge_pending):
+            if workload_id in self._records:  # re-added since: keep it
+                self._purge_pending.discard(workload_id)
+                continue
+            shutil.rmtree(self.root / workload_id, ignore_errors=True)
+            if not (self.root / workload_id).exists():
+                self._purge_pending.discard(workload_id)
 
     def states(self) -> dict[str, WorkloadState]:
-        return {wid: rec.state for wid, rec in self._records.items()}
+        with self._lock:
+            return {wid: rec.state for wid, rec in self._records.items()}
+
+    def job_snapshot(self, prefix: str) -> dict[str, dict[str, object]]:
+        """Thread-safe view of the workloads whose id starts with `prefix` (controller jobs):
+        local state, progress, resource use, result, failures and event history."""
+        with self._lock:
+            out: dict[str, dict[str, object]] = {}
+            for wid, record in self._records.items():
+                if not wid.startswith(prefix):
+                    continue
+                cpu, memory = record.cpu_seconds, 0
+                running = self._running.get(wid)
+                if running is not None:
+                    try:
+                        cpu += running.job.accounting().cpu_seconds
+                    except OSError:
+                        pass
+                    memory = self._private_of(running)
+                out[wid] = {
+                    "state": record.state.value,
+                    "failures": record.failures,
+                    "last_exit_code": record.last_exit_code,
+                    "cpu_seconds": cpu,
+                    "memory_bytes": memory,
+                    "events": [(t, what) for t, w, what in self.events if w == wid],
+                }
+        for wid, item in out.items():  # file reads outside the lock
+            status = self.status_of(wid)
+            item["units_done"] = int(status.get("units_done", 0) or 0)
+            item["result"] = self.result_of(wid)
+        return out
+
+    def result_of(self, workload_id: str) -> dict[str, object] | None:
+        try:
+            return json.loads((self.root / workload_id / "result.json").read_text("utf-8"))
+        except (FileNotFoundError, ValueError):
+            return None
 
     def status_of(self, workload_id: str) -> dict[str, object]:
         try:
@@ -262,6 +333,17 @@ class WorkloadManager:
         policy: ProtectionPolicy,
         memory_total_bytes: int,
         usage: UdcsUsage | None = None,
+    ) -> None:
+        with self._lock:
+            self._enforce(envelope, assessment, policy, memory_total_bytes, usage)
+
+    def _enforce(
+        self,
+        envelope: LevelEnvelope,
+        assessment: Assessment,
+        policy: ProtectionPolicy,
+        memory_total_bytes: int,
+        usage: UdcsUsage | None,
     ) -> None:
         now = self._clock()
         self._ingest_requests()
@@ -541,17 +623,26 @@ class WorkloadManager:
                 )
                 self._event(now, wid, f"exited:{code}")
 
-    def _terminate(self, running: _Running) -> None:
+    def _terminate(self, running: _Running, *, wait_seconds: float = 0.0) -> None:
         try:
             acct = running.job.accounting()
             self._reaped_cpu += acct.cpu_seconds
             self._reaped_io += acct.read_bytes + acct.write_bytes
+            record = self._records.get(running.spec.id)
+            if record is not None:
+                record.cpu_seconds += acct.cpu_seconds
+                self._dirty = True
         except OSError:
             pass
         try:
             running.job.terminate(1)
         except OSError:
             pass
+        if wait_seconds > 0:
+            try:
+                running.process.wait(wait_seconds)
+            except OSError:
+                pass
         running.job.close()
         running.process.close()
 
@@ -569,6 +660,10 @@ class WorkloadManager:
 
     def emergency_pause(self) -> None:
         """Freeze every workload now (used when the governor itself is failing)."""
+        with self._lock:
+            self._emergency_pause()
+
+    def _emergency_pause(self) -> None:
         for running in list(self._running.values()):
             if not running.suspended:
                 try:
@@ -588,6 +683,10 @@ class WorkloadManager:
 
     def shutdown(self) -> None:
         """Stop everything promptly (service stop): checkpoint files already exist."""
+        with self._lock:
+            self._shutdown()
+
+    def _shutdown(self) -> None:
         for running in list(self._running.values()):
             self._terminate(running)
         self._running.clear()
@@ -611,7 +710,8 @@ class WorkloadManager:
         logger.info("workload %s: %s", workload_id, what)
 
     def counts(self) -> dict[str, int]:
-        states = [r.state for r in self._records.values()]
+        with self._lock:
+            states = [r.state for r in self._records.values()]
         return {
             "running": sum(s == WorkloadState.RUNNING for s in states),
             "throttled": sum(s == WorkloadState.THROTTLED for s in states),

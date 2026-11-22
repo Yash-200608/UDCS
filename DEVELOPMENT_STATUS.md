@@ -8,7 +8,8 @@ _Last updated: 2026-11-22. Development checkpoint on branch `feature/udcs-backgr
 |---|---|
 | M1: Working Foundation | **Met**, verified live over TLS on one Windows 11 PC. The "no terminal" gap is now covered by the M1.5 service, which is not yet verified as a service. |
 | M1.5: Background Service & Local Resource Protection | **Implemented. Tested without admin rights. NOT accepted.** Six acceptance gates are still open (see below). Report: [docs/acceptance/milestone-1.5.md](docs/acceptance/milestone-1.5.md) |
-| M2: Job execution | Not started. Blocked on decision D-3 (isolation). |
+| M2a: Distributed execution pipeline (catalog workloads only) | **Implemented and tested** on one PC with two agent instances: controller → scheduler → agent → Job Object workload → telemetry → verified result, plus recovery. See [execution-pipeline.md](docs/architecture/execution-pipeline.md) |
+| M2b: User-supplied code | **Not started; blocked on D-3 (isolation).** No path exists for running user code |
 
 ## Status legend
 
@@ -61,6 +62,32 @@ _Last updated: 2026-11-22. Development checkpoint on branch `feature/udcs-backgr
 | **Session helper autostart at logon** | **implemented, unverified** | the same script |
 | GPU diagnostic E1 (service vs child worker vs session worker) | tested in the user session only | session 0 is pending |
 | Native session helper (D-2) | pending, decision open | — |
+
+### Execution pipeline (M2a, 2026-11-22)
+
+| Component | State | Evidence |
+|---|---|---|
+| Job contracts (catalog spec, sync request and response, result checksum) | tested | `udcs_shared/jobs.py`; controller and agent tests |
+| `jobs` and `job_logs` tables, migration `0003` | tested on SQLite; PostgreSQL in CI (pending the next CI run) | schema-matches-models check, migration round trip |
+| Job API: submit, list, get, cancel, logs, result; per-user limit; admin-only priority; node placement hidden from users | tested | `controller/tests/test_jobs.py` (13) |
+| Pull scheduler: offer-constrained kinds, slots and memory; GPU only on GPU-inventory nodes; GPU-first on GPU nodes; per-user fair share; atomic claim | tested, sequentially | `test_jobs.py`; **concurrent claims are untested** |
+| Leases, requeue, fencing (stale attempt or wrong node), restart grace, failure and requeue limits, lost assignments | tested (3 of 4 key mutations killed; the claim-guard mutation survives) | `test_jobs.py` |
+| Result verification (Σ i² checksum, checkpointed with progress) | tested | unit and e2e. It detects lost or repeated units, **not** a dishonest node (T26) |
+| Agent `JobSync`: capacity offer from the governor envelope, reports, log cursors, persist-before-create, reassignment keeps progress, cancel/ack purge, orphan cleanup | tested | `node_agent/tests/test_job_sync.py` (15) |
+| Workload manager: thread-safe snapshots, ordered request queue, purge with exit-wait and retry, cumulative CPU per workload | tested (real Job Objects) | `test_workloads_windows.py` |
+| **End to end**: 4 jobs over 2 real agents, all verified, spread over both nodes; cancel purges the node; agent restart resumes the same attempt from its checkpoint; a lost node's job is requeued by lease and finished on the other node | **tested** on one PC | `tests/e2e/test_job_pipeline.py` (4, about 5 min) |
+| Pipeline under the real Windows service (SYSTEM, session 0) | **unverified** | part of the elevated M1.5 acceptance |
+| Separate physical machines, real power-off, clock skew | **unverified** | — |
+| Checkpoint migration between nodes; preemption; predictive availability; quotas beyond the per-user limit | pending | — |
+| User-supplied code (containers or sandbox) | **blocked** on D-3 | — |
+
+Test run, 2026-11-22 (local, Windows 11): **192 passed** (full suite, 6 min), and ruff is clean.
+- **Intermittent failures.** In an earlier full run, `test_memory_class_is_paused_while_a_student_is_active` and the e2e cancel test each failed once. Neither reproduced in isolated reruns (3×) or in the next full run.
+- **Cause.** Not identified. The suspicion is timing under load, because both wait on real process start and stop. Treat them as **known flaky** until explained.
+
+Bugs found and fixed while building it:
+- **CPU time was lost for short jobs:** they finished between syncs, so the manager now keeps cumulative CPU per workload.
+- **Cancelled workload directories survived:** Windows would not delete a just-terminated process's working directory, so the manager now waits for the exit and retries the purge.
 
 ## Acceptance gates still open for M1.5
 

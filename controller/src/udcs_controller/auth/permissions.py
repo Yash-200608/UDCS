@@ -18,13 +18,16 @@ class Permission(StrEnum):
     MANAGE_NODES = "manage_nodes"
     MANAGE_ENROLLMENT = "manage_enrollment"
     VIEW_AUDIT = "view_audit"
+    SUBMIT_JOBS = "submit_jobs"  # submit / view / cancel *own* jobs
+    MANAGE_JOBS = "manage_jobs"  # view / cancel anyone's jobs, see node placement
 
 
-# Student and researcher are identical in M1; they will diverge on job quotas and
-# scheduling priority (M2/M3). Keeping them distinct now avoids a data migration.
+# Student and researcher are still identical; they will diverge on quotas and scheduling
+# priority. Only catalog workloads can be submitted, so submitting runs no user code.
+_USER = frozenset({Permission.VIEW_RESOURCE_SUMMARY, Permission.SUBMIT_JOBS})
 ROLE_PERMISSIONS: dict[Role, frozenset[Permission]] = {
-    Role.STUDENT: frozenset({Permission.VIEW_RESOURCE_SUMMARY}),
-    Role.RESEARCHER: frozenset({Permission.VIEW_RESOURCE_SUMMARY}),
+    Role.STUDENT: _USER,
+    Role.RESEARCHER: _USER,
     Role.ADMIN: frozenset(Permission),
 }
 

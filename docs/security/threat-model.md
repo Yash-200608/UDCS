@@ -59,3 +59,13 @@ Scope: M1 (control plane, enrollment, telemetry), plus the threats that M2 execu
 | T21 | Controller tells the node to stop (maintenance / pending / revoked), but the PC reboots while offline | The no-work state is persisted and loaded before the governor starts; an enrolled node lends nothing until the controller confirms it is ACTIVE; an unreadable state file fails closed | [implemented, tested] |
 | T22 | The GPU diagnostic (E1) runs code in the student's session | It is admin-requested only (a file in the admin-only data dir); its child processes run in a kill-on-close job at IDLE priority, are killed at the timeout, and run off the main thread. The `as_user` variant exists **only** to answer E1: running workloads as the student is never acceptable | [implemented]; not run as SYSTEM yet |
 | T23 | Python service hijacked through the environment or user-writable paths | A private interpreter under Program Files (admin-only); `-I` isolated mode, so no `PYTHON*` environment variables or user site; workload children get an explicit `sys.path` in a `-c` bootstrap, not `PYTHONPATH` | [implemented]; packaging verified by the acceptance script |
+
+## Milestone 2 (catalog execution) additions
+
+| # | Threat | Mitigation | Status |
+|---|---|---|---|
+| T24 | A job submission smuggles code or commands onto lab PCs | A job is a catalog `kind` plus bounded integers; there is no field for code, command lines, paths or environment. The agent builds the argv itself from a validated `WorkloadSpec` | [implemented, tested] |
+| T25 | A stale or partitioned node overwrites a reassigned job's result | Fencing: a report counts only if its `(node, attempt)` matches the current assignment; otherwise the node is told to cancel | [implemented, tested] |
+| T26 | A node fakes a result | The checksum detects bugs (lost or repeated units), **not** a dishonest node, which can compute it without working. Requires result attestation and node reputation (with T6) | **open** |
+| T27 | Students learn which lab PC runs whose job | `node_id` is shown only to `manage_jobs`; jobs of other users are 404, not 403 | [implemented, tested] |
+| T28 | A user floods the queue | Per-user unfinished-job limit (`max_active_jobs_per_user`, 429); priority above 0 is admin-only | [implemented, tested]; no per-lab or time quota yet |

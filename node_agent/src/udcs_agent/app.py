@@ -26,6 +26,7 @@ from udcs_agent.discovery.nvidia import Nvml
 from udcs_agent.governor.engine import Governor
 from udcs_agent.governor.interactive import HelperReports, InteractiveMonitor
 from udcs_agent.governor.signals import SignalCollector
+from udcs_agent.jobs import JobSync
 from udcs_agent.monitoring.telemetry import TelemetryCollector
 from udcs_agent.runner import AgentRunner, ExitReason
 from udcs_agent.winplat import IS_WINDOWS
@@ -47,6 +48,8 @@ class AgentApp:
         *,
         stop: threading.Event | None = None,
         require_secure_data_dir: bool = False,
+        helper_channel: bool = True,
+        max_jobs: int = 2,
     ) -> None:
         self.data_dir = data_dir
         self.stop = stop or threading.Event()
@@ -58,6 +61,9 @@ class AgentApp:
         self._credential: NodeCredential | None = None
         self._rotating = threading.Lock()
         self._diagnostic: threading.Thread | None = None
+        self._helper_channel = helper_channel
+        self._max_jobs = max_jobs
+        self.workloads: WorkloadManager | None = None
 
     # -- lifecycle -------------------------------------------------------------------------------
 
@@ -67,7 +73,7 @@ class AgentApp:
         nvml = Nvml()
         nvml.ensure_started()
         reports = HelperReports()
-        workloads = WorkloadManager(self.data_dir)
+        workloads = self.workloads = WorkloadManager(self.data_dir)
         holder: dict[str, Governor] = {}
         monitor = InteractiveMonitor(
             reports, idle_after_seconds=lambda: holder["g"].policy.idle_after_seconds
@@ -92,12 +98,12 @@ class AgentApp:
         )
         others: list[threading.Thread] = []
         channel = None
-        if IS_WINDOWS:
+        if IS_WINDOWS and self._helper_channel:
             from udcs_agent.governor.helper_channel import HelperChannel
 
             channel = HelperChannel(reports, threading.Event())
             others.append(channel)
-        controller = None if insecure else self._controller_thread(nvml, governor)
+        controller = None if insecure else self._controller_thread(nvml, governor, workloads)
         if controller is not None:
             others.append(controller)
         governor_thread.start()
@@ -152,7 +158,9 @@ class AgentApp:
 
     # -- controller link -------------------------------------------------------------------------
 
-    def _controller_thread(self, nvml: Nvml, governor: Governor) -> threading.Thread | None:
+    def _controller_thread(
+        self, nvml: Nvml, governor: Governor, workloads: WorkloadManager
+    ) -> threading.Thread | None:
         try:
             config = load_config(self.data_dir)
             self._credential = self._store.load()
@@ -168,12 +176,28 @@ class AgentApp:
             governor.set_controller_maintenance(True)  # enrolled: wait for the controller's word
         self._client = ControllerClient(config, credential=self._credential.secret)
         telemetry = TelemetryCollector(nvml, self.data_dir, governor=governor.snapshot)
+        inventory = collect_inventory(nvml)
+        jobs = JobSync(
+            self.data_dir,
+            snapshot=workloads.job_snapshot,
+            admission=governor.admission_view,
+            has_gpu=any(g.vendor == "nvidia" for g in inventory.gpus),
+            max_jobs=self._max_jobs,
+        )
+        client = self._client
+
+        def sync_jobs(response: HeartbeatResponse) -> None:
+            # Reports always go out (progress, results, cancellations). New work is only
+            # offered when the node is ACTIVE *and* the local envelope allows it.
+            jobs.sync_once(client)
+
         runner = AgentRunner(
             self._client,
             inventory_source=lambda: collect_inventory(nvml),
             telemetry_source=telemetry.collect,
             stop_event=self.stop,
             on_response=self._on_response,
+            after_heartbeat=sync_jobs,
         )
 
         def run() -> None:

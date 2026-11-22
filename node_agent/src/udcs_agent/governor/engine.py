@@ -8,6 +8,7 @@ import os
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 from udcs_agent.governor.classifier import Assessment, Hysteresis, Signals, classify
@@ -15,6 +16,7 @@ from udcs_agent.governor.signals import SignalCollector
 from udcs_agent.workloads.manager import WorkloadManager
 from udcs_shared.protection import (
     InteractiveState,
+    LevelEnvelope,
     ProtectionLevel,
     ProtectionPolicy,
     ProtectionStatus,
@@ -25,6 +27,16 @@ logger = logging.getLogger(__name__)
 
 MAX_CONSECUTIVE_TICK_FAILURES = 5
 STATUS_WRITE_INTERVAL_SECONDS = 5.0
+
+
+@dataclass(frozen=True)
+class AdmissionView:
+    level: ProtectionLevel
+    reasons: frozenset[str]
+    maintenance: bool
+    envelope: LevelEnvelope
+    memory_total_bytes: int
+    udcs_memory_bytes: int
 
 
 class Governor:
@@ -73,6 +85,26 @@ class Governor:
 
     def set_controller_maintenance(self, maintenance: bool) -> None:
         self._controller_maintenance = maintenance
+
+    def admission_view(self) -> AdmissionView | None:
+        """What the job-sync thread needs to decide how much *new* work to offer.
+        None until the first assessment: no offer is made before the node has measured."""
+        with self._lock:
+            last = self._last
+        if last is None:
+            return None
+        signals, usage, assessment, level = last
+        maintenance = self._controller_maintenance or (
+            self._maintenance_flag is not None and self._maintenance_flag.exists()
+        )
+        return AdmissionView(
+            level=level,
+            reasons=frozenset(assessment.reasons),
+            maintenance=maintenance,
+            envelope=self.policy.envelopes[level],
+            memory_total_bytes=signals.memory_total_bytes,
+            udcs_memory_bytes=int(usage.memory_bytes.udcs),
+        )
 
     # -- the loop --------------------------------------------------------------------------------
 

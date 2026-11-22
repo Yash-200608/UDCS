@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import socket
 import threading
 import time
@@ -31,6 +32,24 @@ def _free_port() -> int:
 
 @pytest.fixture
 def controller(tmp_path):
+    with _running_controller(tmp_path) as running:
+        yield running
+
+
+@pytest.fixture
+def controller_factory(tmp_path):
+    """Start a controller with custom settings, e.g. short heartbeats and leases."""
+    stack = contextlib.ExitStack()
+
+    def _start(*, tokens: int = 2, **settings):
+        return stack.enter_context(_running_controller(tmp_path, tokens=tokens, **settings))
+
+    with stack:
+        yield _start
+
+
+@contextlib.contextmanager
+def _running_controller(tmp_path, *, tokens: int = 2, **overrides):
     ca = trustme.CA()
     server_cert = ca.issue_cert("127.0.0.1", "localhost")
     cert_file, key_file, ca_file = (tmp_path / n for n in ("server.pem", "server.key", "ca.pem"))
@@ -39,7 +58,11 @@ def controller(tmp_path):
     ca.cert_pem.write_to_path(str(ca_file))
 
     app = create_app(
-        Settings(database_url=f"sqlite:///{(tmp_path / 'e2e.db').as_posix()}", log_json=False)
+        Settings(
+            database_url=f"sqlite:///{(tmp_path / 'e2e.db').as_posix()}",
+            log_json=False,
+            **overrides,
+        )
     )
     upgrade_to_head(app.state.engine)
     with app.state.sessionmaker() as db:
@@ -57,7 +80,7 @@ def controller(tmp_path):
                 note="e2e",
                 now=utcnow(),
             )[1]
-            for _ in range(2)
+            for _ in range(tokens)
         ]
         db.commit()
 
@@ -80,11 +103,14 @@ def controller(tmp_path):
         if time.monotonic() > deadline:
             raise RuntimeError("controller did not start")
         time.sleep(0.05)
-    yield SimpleNamespace(
-        admin_password=ADMIN_PASSWORD,
-        url=f"https://127.0.0.1:{port}",
-        ca_file=ca_file,
-        tokens=tokens,
-    )
-    server.should_exit = True
-    thread.join(timeout=10)
+    try:
+        yield SimpleNamespace(
+            admin_password=ADMIN_PASSWORD,
+            url=f"https://127.0.0.1:{port}",
+            ca_file=ca_file,
+            tokens=tokens,
+            app=app,
+        )
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)

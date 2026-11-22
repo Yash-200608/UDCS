@@ -27,6 +27,7 @@ from udcs_shared.agent_api import (
     RotateCredentialResponse,
 )
 from udcs_shared.hardware import HardwareInventory
+from udcs_shared.jobs import JobSyncRequest, JobSyncResponse
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
 
@@ -122,6 +123,9 @@ class ControllerClient:
             raise CredentialRejected("agent has no node credential")
         self._raise_for_status(response, enrolling=False)
         return self._parse(response, RotateCredentialResponse).node_credential
+
+    def sync_jobs(self, request: JobSyncRequest) -> JobSyncResponse:
+        return self._parse(self._send("POST", "/agent/jobs/sync", request), JobSyncResponse)
 
     def set_credential(self, credential: str) -> None:
         self._credential = credential

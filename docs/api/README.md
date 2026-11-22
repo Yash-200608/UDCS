@@ -33,6 +33,12 @@ The prefixes let each endpoint reject the wrong credential type immediately. A n
 | `POST /admin/nodes/{id}/state` | `manage_nodes` | `{admin_state: active \| maintenance}`; refused for `pending` nodes (approve first) | [implemented] |
 | `POST /admin/nodes/{id}/revoke` | `manage_nodes` | permanently revoke node credential | [implemented] |
 | `GET /admin/audit-events` | `view_audit` | newest first, `?limit=&action=` | [implemented] |
+| `POST /jobs` | `submit_jobs` (all roles) | `{name?, kind: cpu\|memory\|disk\|gpu, total_units, memory_mb?, priority?}`: catalog workloads only (no user code); priority > 0 needs `manage_jobs`; 429 over the per-user unfinished-job limit | [implemented] |
+| `GET /jobs` | `submit_jobs` | own jobs, newest first; `?state=&limit=`; `?all=true` lists everyone's for `manage_jobs` | [implemented] |
+| `GET /jobs/{id}` | owner or `manage_jobs` | state, `local_state` (the node's governor view, e.g. paused), progress, attempt, failures, requeues, CPU seconds, memory; `node_id` only for `manage_jobs`; others' jobs are 404 | [implemented] |
+| `POST /jobs/{id}/cancel` | owner or `manage_jobs` | 409 if already terminal; the node stops and purges it on its next sync | [implemented] |
+| `GET /jobs/{id}/logs` | owner or `manage_jobs` | lifecycle log: controller events plus the node's governor events | [implemented] |
+| `GET /jobs/{id}/result` | owner or `manage_jobs` | `{result: {units, checksum}, verified}`; 409 unless succeeded | [implemented] |
 
 ## Agent endpoints
 
@@ -42,6 +48,7 @@ The prefixes let each endpoint reject the wrong credential type immediately. A n
 | `POST /agent/heartbeat` | node credential | `{protocol_version, telemetry, inventory_fingerprint}` → `{heartbeat_interval_seconds, inventory_required, admin_state, protection_policy, rotate_credential}` | [implemented] |
 | `POST /agent/credential/rotate` | node credential | → `{node_credential}`; the old credential stays valid until the new one is first used | [implemented] |
 | `PUT /agent/inventory` | node credential | `{inventory}` → 204 | [implemented] |
+| `POST /agent/jobs/sync` | node credential | `{protocol_version, reports[], capacity}` → `{assignments[], cancel[], acknowledged[], lease_seconds}`; reconciling and idempotent; see [execution-pipeline.md](../architecture/execution-pipeline.md) | [implemented] |
 
 ## Health
 

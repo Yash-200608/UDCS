@@ -7,6 +7,9 @@ They implement the cooperative workload contract (operating model §8):
 - write WORKDIR/status.json   {"state", "units_done", "ack_seq", ...}
 - keep  WORKDIR/checkpoint.json so a restarted run resumes where it stopped
 - exit 0 when complete, EXIT_CHECKPOINTED after a requested checkpoint.
+- on completion write WORKDIR/result.json {"units", "checksum"}, where checksum =
+  sum(i*i) over every unit index processed. It is checkpointed with units_done, so a
+  lost or repeated unit across resume is detectable (udcs_shared.jobs.expected_checksum).
 """
 
 from __future__ import annotations
@@ -114,9 +117,11 @@ def run(kind: str, workdir: Path, total_units: int, memory_mb: int) -> int:
     checkpoint_path, status_path = workdir / "checkpoint.json", workdir / "status.json"
     control = _Control(workdir / "control.json")
     try:
-        units_done = int(json.loads(checkpoint_path.read_text())["units_done"])
+        saved = json.loads(checkpoint_path.read_text())
+        units_done = int(saved["units_done"])
+        checksum = int(saved.get("checksum", 0))
     except (FileNotFoundError, ValueError, KeyError):
-        units_done = 0
+        units_done, checksum = 0, 0
     resumed_from = units_done
 
     def status(state: str) -> None:
@@ -135,7 +140,7 @@ def run(kind: str, workdir: Path, total_units: int, memory_mb: int) -> int:
         )
 
     def checkpoint() -> None:
-        _atomic_write(checkpoint_path, {"units_done": units_done})
+        _atomic_write(checkpoint_path, {"units_done": units_done, "checksum": checksum})
 
     unit, cleanup = _make_unit(kind, workdir, memory_mb)
     last_save = time.monotonic()
@@ -153,12 +158,14 @@ def run(kind: str, workdir: Path, total_units: int, memory_mb: int) -> int:
                 continue
             if unit() is False:
                 continue
+            checksum += units_done * units_done
             units_done += 1
             if time.monotonic() - last_save >= 2.0:
                 checkpoint()
                 status("running")
                 last_save = time.monotonic()
         checkpoint()
+        _atomic_write(workdir / "result.json", {"units": units_done, "checksum": str(checksum)})
         status("completed")
         return 0
     finally:

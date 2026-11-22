@@ -33,6 +33,12 @@ class Settings(BaseSettings):
     protection_policy_version: int = Field(default=1, ge=1)
     login_attempts_per_minute: int = Field(default=10, ge=1, le=10_000)
     enroll_attempts_per_minute: int = Field(default=10, ge=1, le=10_000)
+    # Jobs (catalog workloads). A lease not renewed for this long is requeued.
+    job_lease_seconds: int = Field(default=120, ge=30, le=3600)
+    job_max_failures: int = Field(default=3, ge=1, le=20)
+    job_max_requeues: int = Field(default=10, ge=1, le=100)
+    max_active_jobs_per_user: int = Field(default=50, ge=1, le=100_000)
+    job_log_lines_max: int = Field(default=500, ge=50, le=100_000)
     log_level: str = Field(default="INFO", pattern=r"^(DEBUG|INFO|WARNING|ERROR)$")
     log_json: bool = True
 
@@ -41,6 +47,10 @@ class Settings(BaseSettings):
         return timedelta(
             seconds=self.heartbeat_interval_seconds * self.offline_after_missed_heartbeats
         )
+
+    @property
+    def job_lease(self) -> timedelta:
+        return timedelta(seconds=self.job_lease_seconds)
 
     @property
     def session_ttl(self) -> timedelta:

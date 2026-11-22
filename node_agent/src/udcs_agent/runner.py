@@ -59,6 +59,7 @@ class AgentRunner:
         monotonic: Callable[[], float] = time.monotonic,
         rng: Callable[[], float] = random.random,
         on_response: Callable[[HeartbeatResponse], None] | None = None,
+        after_heartbeat: Callable[[HeartbeatResponse], None] | None = None,
     ) -> None:
         self._controller = controller
         self._inventory_source = inventory_source
@@ -69,6 +70,8 @@ class AgentRunner:
         self._monotonic = monotonic
         self._rng = rng
         self._on_response = on_response
+        # e.g. job sync. Runs in this loop, so a controller outage backs it off too.
+        self._after_heartbeat = after_heartbeat
         self.consecutive_failures = 0
 
     def backoff_delay(self, failures: int) -> float:
@@ -109,6 +112,8 @@ class AgentRunner:
                 )
                 if self._on_response is not None:
                     self._on_response(response)
+                if self._after_heartbeat is not None:
+                    self._after_heartbeat(response)
                 self._interval = clamp_interval(response.heartbeat_interval_seconds)
                 inventory_pending = response.inventory_required
                 if self.consecutive_failures:
