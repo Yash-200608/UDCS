@@ -9,7 +9,7 @@ _Last updated: 2026-11-22. Development checkpoint on branch `feature/udcs-backgr
 | M1: Working Foundation | **Met**, verified live over TLS on one Windows 11 PC. The "no terminal" gap is now covered by the M1.5 service, which is not yet verified as a service. |
 | M1.5: Background Service & Local Resource Protection | **Implemented. Tested without admin rights. NOT accepted.** Six acceptance gates are still open (see below). Report: [docs/acceptance/milestone-1.5.md](docs/acceptance/milestone-1.5.md) |
 | M2a: Distributed execution pipeline (catalog workloads only) | **Implemented and tested** on one PC with two agent instances: controller → scheduler → agent → Job Object workload → telemetry → verified result, plus recovery. See [execution-pipeline.md](docs/architecture/execution-pipeline.md) |
-| M2b: Isolation for workloads (D-3) | **Decided: [ADR 0001](docs/decisions/0001-workload-isolation.md). Native AppContainer backend implemented and tested; the catalog runs inside it where a node verifies it.** User code is still **disabled**: the service-path gate (elevated) is open |
+| M2b: Isolation for workloads (D-3) | **Decided: [ADR 0001](docs/decisions/0001-workload-isolation.md). Native AppContainer backend implemented and tested; the catalog runs inside it where a node verifies it.** **Service-path gate passed** (2026-11-22, SYSTEM in session 0). User code is still **disabled**: ADR gates 2 (review of what ALL APPLICATION PACKAGES exposes on a lab image) and 3 (packaging design) are open |
 
 ## Status legend
 
@@ -78,7 +78,7 @@ _Last updated: 2026-11-22. Development checkpoint on branch `feature/udcs-backgr
 | Agent `JobSync`: capacity offer from the governor envelope, reports, log cursors, persist-before-create, reassignment keeps progress, cancel/ack purge, orphan cleanup | tested | `node_agent/tests/test_job_sync.py` (15) |
 | Workload manager: thread-safe snapshots, ordered request queue, purge with exit-wait and retry, cumulative CPU per workload | tested (real Job Objects) | `test_workloads_windows.py` |
 | **End to end**: 4 jobs over 2 real agents, all verified, spread over both nodes; cancel purges the node; agent restart resumes the same attempt from its checkpoint; a lost node's job is requeued by lease and finished on the other node | **tested** on one PC | `tests/e2e/test_job_pipeline.py` (4, about 5 min) |
-| Pipeline under the real Windows service (SYSTEM, session 0) | **unverified** | part of the elevated M1.5 acceptance |
+| Pipeline under the real Windows service (SYSTEM, session 0) | partly verified: the service manages and recovers workloads, and isolated launches work from it; a full controller-driven job through the installed service has not been run (this install is not enrolled) | `m15-service-acceptance.json`, `m2-isolation-service.json` |
 | Separate physical machines, real power-off, clock skew | **unverified** | — |
 | Checkpoint migration between nodes; preemption; predictive availability; quotas beyond the per-user limit | pending | — |
 | User-supplied code | **disabled**: the isolation backend exists, and the gate (service-path acceptance, ALL APPLICATION PACKAGES review, packaging design) is open | ADR 0001 |
@@ -137,14 +137,14 @@ Decision: [ADR 0001](docs/decisions/0001-workload-isolation.md).
 | Four catalog workloads (cpu, memory, disk, **gpu/CUDA**) completing inside AppContainer, with governor pause and Job Object accounting intact | tested on the GT 730 | same |
 | Isolation self-test: 18 operations (allowed vs prohibited), token, environment, process-tree kill, each with an unsandboxed control | **passed as the interactive user** | `test_isolation_selftest_denies_every_prohibited_operation`; the `AgentApp` request-file path (`test_agent_app.py`) |
 | Per-node capability detection reported in inventory (`isolation`: appcontainer, lpac, mxc, windows_sandbox, hyperv, wsl) | tested | `test_detection_reports_a_verified_appcontainer` |
-| **Self-test from the installed service (LocalSystem, session 0)** | **not run; needs elevation** | `tools/acceptance/m2_isolation_service_acceptance.ps1` |
+| **Self-test from the installed service (LocalSystem, session 0)** | **PASSED** (2026-11-22): all 16 prohibited operations denied, each possible for the SYSTEM control, lsass included; token privilege-free; tree kill OK; CUDA OK inside | `docs/acceptance/data/m2-isolation-service.json` |
 | LPAC (stricter) | not used: Python fails at start (0xC0000022) on build 22000 | detection reports it |
 
 **Bugs found on the way:**
 - `synthetic.py` passed an invalid 32-bit handle to `SetPriorityClass`. Windows ignored it on the host, so **background mode was never applied before**; inside AppContainer it crashed.
 - The self-test's unsandboxed control wrote into the shared runtime, which would have broken every later isolated job on a node.
 - `DeleteAppContainerProfile` reports success for unknown profiles. Leaks are now checked through the registry mapping and swept.
-- **CI after the fixes** ([45009429033](https://github.com/Yash-200608/UDCS/actions/runs/45009429033)): Windows **217 passed** (isolation self-test, catalog in AppContainer, job pipeline in AppContainer) with an elevated-admin parent on build 26100; PostgreSQL 90/90 + 150/150 races; lint clean. The real service (LocalSystem, session 0) is still not run: `m2_isolation_service_acceptance.ps1`.
+- **CI after the fixes** ([45009429033](https://github.com/Yash-200608/UDCS/actions/runs/45009429033)): Windows **217 passed** (isolation self-test, catalog in AppContainer, job pipeline in AppContainer) with an elevated-admin parent on build 26100; PostgreSQL 90/90 + 150/150 races; lint clean. The real service run followed and **passed** (see the isolation table).
 - **Grants also name the agent's own user SID** (CI): otherwise an admin-parented workload could not write an admin-only workdir.
 - **Found by CI, which is the closest thing to the service path run so far.** With an elevated-admin parent (and therefore almost certainly a LocalSystem one), the restricted token kept Administrators as owner and in its default DACL, so every AppContainer child failed with 0xC0000142. Fixed: owner and default DACL are now the user, SYSTEM and the package SID. Workloads also run on a private window station or desktop, never the student's. Verified on the runner with `tools/experiments/appcontainer_ci_probe.py`.
 
@@ -178,12 +178,19 @@ Decision: [ADR 0001](docs/decisions/0001-workload-isolation.md).
 
 ## Acceptance gates still open for M1.5
 
-None of these are done. Do not report them as passed until they are.
+Do not report an item as passed until it is.
 
-1. **Elevated Windows service acceptance.** Run `tools/acceptance/m15_service_acceptance.ps1` in an elevated shell on a lab PC.
-2. **Actual reboot and crash-recovery verification.** Run the same script, reboot, then run it with `-AfterReboot`.
-3. **Session-0 CUDA execution verification (E1 as SYSTEM).** The GT 730 detection is not evidence of workload compatibility. RTX-class hardware is still untested.
-4. **Real service resource overhead.** The 124 MiB RSS was measured in the benchmark process, not the service. The target is ≤ 80 MiB.
+1. **Elevated Windows service acceptance: pass 1 PASSED** (2026-11-22, `data/m15-service-acceptance.json`).
+   - Service start, LocalSystem in session 0, no visible windows.
+   - Helper and presence, workload management, graceful stop in 0.27 s.
+2. **Reboot and crash recovery.**
+   - Crash recovery **passed**: the service restarted in 6.1 s, and the workload resumed from its checkpoint 1.1 s later.
+   - **Service start after a reboot is still open**: run `m15_service_acceptance.ps1 -AfterReboot` after a reboot.
+3. **Session-0 CUDA (E1 as SYSTEM): PASSED** for the arrangements UDCS uses.
+   - CUDA works in the service process (context 110 ms, 20 ms kernels), in its child worker, and inside the AppContainer (`cuInit`).
+   - A worker as the logged-in *user* failed ("probe produced no result"). It is not investigated, because UDCS never runs work as the student.
+   - Only on the GT 730 (CC 3.5); RTX-class hardware is still untested.
+4. **Real service resource overhead: PASSED.** 55.6 MiB RSS and 44.2 MiB private (target ≤ 80 MiB), 0.68% of one core; workload jobs are excluded.
 5. **PostgreSQL integration through CI: passed in CI on the feature branch** (run 44985979000, 57/57). This gate is closed for the controller only. Remaining limits:
    - The model diff ignores CHECK constraints and server defaults. The `admin_state` CHECK is covered behaviourally by `test_migration_data.py`.
    - The end-to-end TLS tests run on SQLite.

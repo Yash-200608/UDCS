@@ -1,0 +1,221 @@
+{
+    "build":  22000,
+    "python":  "3.12.10",
+    "checks":  [
+                   {
+                       "name":  "connect:external",
+                       "expected":  "denied",
+                       "sandbox":  "denied (PermissionError: [WinError 10013] An attempt was made to access a socket in a way forbidden by its access permissions)",
+                       "host_control":  "allowed",
+                       "pass":  true
+                   },
+                   {
+                       "name":  "connect:loopback",
+                       "expected":  "denied",
+                       "sandbox":  "denied (TimeoutError: timed out)",
+                       "host_control":  "allowed",
+                       "pass":  true
+                   },
+                   {
+                       "name":  "list:outside_dir",
+                       "expected":  "denied",
+                       "sandbox":  "denied (PermissionError: [WinError 5] Access is denied: \u0027C:\\\\ProgramData\\\\UDCS\\\\agent\\\\diagnostics\\\\isolation\\\\forbidden\u0027)",
+                       "host_control":  "allowed",
+                       "pass":  true
+                   },
+                   {
+                       "name":  "list:user_profile:<user>",
+                       "expected":  "denied",
+                       "sandbox":  "denied (PermissionError: [WinError 5] Access is denied: \u0027C:\\\\Users\\\\<user>\u0027)",
+                       "host_control":  "allowed",
+                       "pass":  true
+                   },
+                   {
+                       "name":  "open_process:agent_terminate",
+                       "expected":  "denied",
+                       "sandbox":  "denied (OSError: [Errno 5] OpenProcess denied)",
+                       "host_control":  "allowed",
+                       "pass":  true
+                   },
+                   {
+                       "name":  "open_process:agent_vm_read",
+                       "expected":  "denied",
+                       "sandbox":  "denied (OSError: [Errno 5] OpenProcess denied)",
+                       "host_control":  "allowed",
+                       "pass":  true
+                   },
+                   {
+                       "name":  "open_process:host_helper_terminate",
+                       "expected":  "denied",
+                       "sandbox":  "denied (OSError: [Errno 5] OpenProcess denied)",
+                       "host_control":  "allowed",
+                       "pass":  true
+                   },
+                   {
+                       "name":  "open_process:lsass_vm_read",
+                       "expected":  "denied",
+                       "sandbox":  "denied (OSError: [Errno 5] OpenProcess denied)",
+                       "host_control":  "allowed",
+                       "pass":  true
+                   },
+                   {
+                       "name":  "read:agent_credential",
+                       "expected":  "denied",
+                       "sandbox":  "denied (PermissionError: [Errno 13] Permission denied: \u0027C:\\\\ProgramData\\\\UDCS\\\\agent\\\\diagnostics\\\\isolation\\\\forbidden\\\\credential.dat\u0027)",
+                       "host_control":  "allowed",
+                       "pass":  true
+                   },
+                   {
+                       "name":  "read:approved_input",
+                       "expected":  "allowed",
+                       "sandbox":  "allowed",
+                       "host_control":  "allowed",
+                       "pass":  true
+                   },
+                   {
+                       "name":  "read:other_workload",
+                       "expected":  "denied",
+                       "sandbox":  "denied (PermissionError: [Errno 13] Permission denied: \u0027C:\\\\ProgramData\\\\UDCS\\\\agent\\\\diagnostics\\\\isolation\\\\other\\\\secret.txt\u0027)",
+                       "host_control":  "allowed",
+                       "pass":  true
+                   },
+                   {
+                       "name":  "read:outside_secret",
+                       "expected":  "denied",
+                       "sandbox":  "denied (PermissionError: [Errno 13] Permission denied: \u0027C:\\\\ProgramData\\\\UDCS\\\\agent\\\\diagnostics\\\\isolation\\\\forbidden\\\\secret.txt\u0027)",
+                       "host_control":  "allowed",
+                       "pass":  true
+                   },
+                   {
+                       "name":  "read:runtime_code",
+                       "expected":  "allowed",
+                       "sandbox":  "allowed",
+                       "host_control":  "allowed",
+                       "pass":  true
+                   },
+                   {
+                       "name":  "registry:hkcu_secret",
+                       "expected":  "denied",
+                       "sandbox":  "denied (PermissionError: [WinError 5] Access is denied)",
+                       "host_control":  "allowed",
+                       "pass":  true
+                   },
+                   {
+                       "name":  "resolve:dns",
+                       "expected":  "denied",
+                       "sandbox":  "denied (gaierror: [Errno 11001] getaddrinfo failed)",
+                       "host_control":  "allowed",
+                       "pass":  true
+                   },
+                   {
+                       "name":  "write:approved_input",
+                       "expected":  "denied",
+                       "sandbox":  "denied (PermissionError: [Errno 13] Permission denied: \u0027C:\\\\ProgramData\\\\UDCS\\\\agent\\\\diagnostics\\\\isolation\\\\input\\\\data.txt\u0027)",
+                       "host_control":  "allowed",
+                       "pass":  true
+                   },
+                   {
+                       "name":  "write:other_workload",
+                       "expected":  "denied",
+                       "sandbox":  "denied (PermissionError: [Errno 13] Permission denied: \u0027C:\\\\ProgramData\\\\UDCS\\\\agent\\\\diagnostics\\\\isolation\\\\other\\\\secret.txt\u0027)",
+                       "host_control":  "allowed",
+                       "pass":  true
+                   },
+                   {
+                       "name":  "write:own_output",
+                       "expected":  "allowed",
+                       "sandbox":  "allowed",
+                       "host_control":  "allowed",
+                       "pass":  true
+                   },
+                   {
+                       "name":  "write:runtime_code",
+                       "expected":  "denied",
+                       "sandbox":  "denied (PermissionError: [Errno 13] Permission denied: \u0027C:\\\\ProgramData\\\\UDCS\\\\agent\\\\runtime\\\\synthetic.py\u0027)",
+                       "host_control":  "allowed",
+                       "pass":  true
+                   },
+                   {
+                       "name":  "token:appcontainer_low_integrity_no_privileges",
+                       "expected":  "AppContainer, integrity \u003c= low, privileges \u003c= SeChangeNotify",
+                       "sandbox":  "{\"is_appcontainer\": true, \"integrity_rid\": 4096, \"privileges\": [{\"name\": \"SeChangeNotifyPrivilege\", \"enabled\": true}]}",
+                       "host_control":  "",
+                       "pass":  true
+                   },
+                   {
+                       "name":  "env:no_inherited_agent_environment",
+                       "expected":  "only SystemRoot/TEMP/TMP/USERPROFILE/LOCALAPPDATA (+ Windows-added)",
+                       "sandbox":  "LOCALAPPDATA,SYSTEMROOT,TEMP,TMP,USERPROFILE",
+                       "host_control":  "",
+                       "pass":  true
+                   }
+               ],
+    "sandbox_seconds":  27.217,
+    "sandbox_exit":  0,
+    "host_seconds":  1.21,
+    "host_exit":  0,
+    "kill_tree":  {
+                      "pass":  true,
+                      "job_members":  [
+                                          5736,
+                                          17000,
+                                          20436,
+                                          21428
+                                      ],
+                      "still_alive":  [
+
+                                      ]
+                  },
+    "cuda_in_sandbox":  {
+                            "ok":  true,
+                            "detail":  "devices=1"
+                        },
+    "cuda_on_host":  {
+                         "ok":  true,
+                         "detail":  "devices=1"
+                     },
+    "passed":  true,
+    "capabilities":  [
+                         {
+                             "name":  "appcontainer",
+                             "available":  true,
+                             "verified":  true,
+                             "detail":  "launch verified (263 ms)"
+                         },
+                         {
+                             "name":  "appcontainer_lpac",
+                             "available":  false,
+                             "verified":  true,
+                             "detail":  "cmd.exe test: launch verified (141 ms)"
+                         },
+                         {
+                             "name":  "mxc_processcontainer",
+                             "available":  false,
+                             "verified":  false,
+                             "detail":  "wxc-exec.exe not installed"
+                         },
+                         {
+                             "name":  "windows_sandbox",
+                             "available":  false,
+                             "verified":  false,
+                             "detail":  "Windows Sandbox feature not installed"
+                         },
+                         {
+                             "name":  "hyperv",
+                             "available":  false,
+                             "verified":  false,
+                             "detail":  "Hyper-V host compute service present; not orchestrated by UDCS"
+                         },
+                         {
+                             "name":  "wsl",
+                             "available":  false,
+                             "verified":  false,
+                             "detail":  "wsl.exe present; not used"
+                         }
+                     ],
+    "agent_identity":  {
+                           "pid":  19348,
+                           "user":  "NT AUTHORITY\\SYSTEM",
+                           "session_id":  0
+                       }
+}

@@ -1,0 +1,134 @@
+{
+    "machine":  {
+                    "host":  "<host>",
+                    "os":  "Microsoft Windows 11 Pro Education",
+                    "build":  "10.0.22000.0",
+                    "gpu":  [
+                                "Intel(R) HD Graphics 530 (31.0.101.2111)",
+                                "NVIDIA GeForce GT 730 (27.21.14.5671)"
+                            ]
+                },
+    "started":  "2026-11-22T15:52:30.3476584+05:30",
+    "checks":  {
+                   "service_starts":  {
+                                          "pass":  true,
+                                          "detail":  {
+                                                         "first_status_s":  6.4111880999999995,
+                                                         "start_s":  1.86
+                                                     }
+                                      },
+                   "session0_localsystem":  {
+                                                "pass":  true,
+                                                "detail":  {
+                                                               "start_mode":  "Auto",
+                                                               "account":  "LocalSystem",
+                                                               "delayed":  true,
+                                                               "session":  0
+                                                           }
+                                            },
+                   "no_visible_windows":  {
+                                              "pass":  true,
+                                              "detail":  {
+                                                             "windowed_processes":  0
+                                                         }
+                                          },
+                   "service_overhead":  {
+                                            "pass":  true,
+                                            "detail":  {
+                                                           "cpu_percent_one_core":  0.677,
+                                                           "private_mib":  44.2,
+                                                           "note":  "service process only; workload jobs excluded",
+                                                           "rss_mib":  55.6
+                                                       }
+                                        },
+                   "helper_and_presence":  {
+                                               "pass":  true,
+                                               "detail":  {
+                                                              "interactive":  "active",
+                                                              "level":  "constrained",
+                                                              "reasons":  [
+                                                                              "user_active",
+                                                                              "cpu_pressure"
+                                                                          ]
+                                                          }
+                                           },
+                   "workload_managed":  {
+                                            "pass":  true,
+                                            "detail":  {
+                                                           "units_done":  299,
+                                                           "level":  "constrained",
+                                                           "state":  "throttled"
+                                                       }
+                                        },
+                   "crash_recovery":  {
+                                          "pass":  true,
+                                          "detail":  {
+                                                         "workload_resumed_after_s":  1.0850776,
+                                                         "resumed_from_units":  314,
+                                                         "restarted_after_s":  6.0518120999999994
+                                                     }
+                                      },
+                   "e1_completed":  {
+                                        "pass":  true,
+                                        "detail":  {
+                                                       "seconds":  12.414586499999999
+                                                   }
+                                    },
+                   "graceful_stop":  {
+                                         "pass":  true,
+                                         "detail":  {
+                                                        "registry_state":  "waiting",
+                                                        "stop_s":  0.27,
+                                                        "workload_processes_left":  0
+                                                    }
+                                     }
+               },
+    "e1_gpu_matrix":  {
+                          "host_session_id":  0,
+                          "started":  1795343029.012957,
+                          "arrangements":  {
+                                               "service_process":  {
+                                                                       "session_id":  0,
+                                                                       "pid":  8584,
+                                                                       "account":  "<host>$",
+                                                                       "device":  "GeForce GT 730",
+                                                                       "compute_capability":  "3.5",
+                                                                       "context_ms":  110.2,
+                                                                       "ok":  true,
+                                                                       "kernel_ms_median":  20.01
+                                                                   },
+                                               "service_child_worker":  {
+                                                                            "session_id":  0,
+                                                                            "pid":  25524,
+                                                                            "account":  "<host>$",
+                                                                            "device":  "GeForce GT 730",
+                                                                            "compute_capability":  "3.5",
+                                                                            "context_ms":  798.6,
+                                                                            "ok":  true,
+                                                                            "kernel_ms_median":  20.04,
+                                                                            "exit_code":  0
+                                                                        },
+                                               "session_worker_system":  {
+                                                                             "session_id":  1,
+                                                                             "pid":  22732,
+                                                                             "account":  "<host>$",
+                                                                             "device":  "GeForce GT 730",
+                                                                             "compute_capability":  "3.5",
+                                                                             "context_ms":  4119.9,
+                                                                             "ok":  true,
+                                                                             "kernel_ms_median":  20.01,
+                                                                             "exit_code":  0
+                                                                         },
+                                               "session_worker_user":  {
+                                                                           "ok":  false,
+                                                                           "error":  "probe produced no result",
+                                                                           "exit_code":  1
+                                                                       }
+                                           },
+                          "finished":  1795343040.498717,
+                          "protection_level_at_start":  "constrained"
+                      },
+    "reboot_marker":  {
+                          "boot_before":  "2026-11-21T10:34:06.5016940+05:30"
+                      }
+}

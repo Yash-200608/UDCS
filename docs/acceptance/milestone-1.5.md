@@ -4,15 +4,15 @@ _2026-11-22. Raw data: `docs/acceptance/data/`. These are engineering targets me
 
 ## Verdict
 
-**Not accepted yet.** All criteria that can be verified without administrator rights pass, but the service-level criteria have **not been run**, because they need an elevated shell:
+**Not accepted yet, but close.** The elevated service run (pass 1, 2026-11-22, `data/m15-service-acceptance.json`) passed every check:
+- service start, LocalSystem in session 0, no visible windows;
+- service overhead: 55.6 MiB RSS, 0.68% of one core;
+- helper and presence;
+- workload management and crash recovery as a real service;
+- E1 (CUDA works in the service process and in its child worker);
+- graceful stop in 0.27 s.
 
-- service start after reboot;
-- crash recovery as a real service;
-- E1 (whether CUDA works in session 0);
-- service overhead;
-- helper at logon.
-
-They are scripted in `tools/acceptance/m15_service_acceptance.ps1`.
+**Still open:** pass 2, *service start after a reboot* (`m15_service_acceptance.ps1 -AfterReboot`), which needs a reboot.
 
 Status of the other gates:
 - **PostgreSQL integration through CI:** passed on the feature branch. CI run 44985979000 migrated a clean PostgreSQL 16 database to head, and 57/57 controller and shared tests passed. Getting there exposed two real bugs, both now fixed: data loss in the 0002 downgrade on SQLite, and nondeterministic audit ordering.
@@ -86,12 +86,17 @@ _3 trials each, 0 missed. "Student arrives" = a presence change delivered as a s
 |---|---|---|
 | Local protection while the controller is unreachable | `tests/e2e/test_agent_app.py`: the governor keeps ticking and enforcing | ✅ |
 | Fail closed when never confirmed by the controller | the same file: an enrolled, never-confirmed node lends nothing | ✅ |
-| Graceful shutdown | agent stop < 5 s in the test; the target is < 2 s in the service | ⚠️ unmeasured in service |
+| Graceful shutdown | **service** stop 0.27 s, no workload processes left, registry state `waiting` (resumable) | ✅ (pass 1) |
 | Workload state recovery | `test_workloads_windows.py`: checkpoint → evict → resume continues from the saved unit count; a restarted manager resumes from the registry | ✅ |
 | Governor overhead | 1.97 ms CPU per tick, 0.21% of one core | ✅ |
-| Service RSS ≤ 80 MiB | the benchmark process measured 124 MiB, but it loads the test tooling | ❓ unverified |
-| Service start after reboot, crash recovery, session 0, no windows, helper at logon | `m15_service_acceptance.ps1` | ⏳ not run (needs admin) |
-| E1: CUDA from the service vs a child worker vs a session worker | built into the service as a diagnostic; works as a normal user (child worker: 20 ms kernels) | ⏳ not run as SYSTEM |
+| Service RSS ≤ 80 MiB | **the service process:** 55.6 MiB RSS, 44.2 MiB private, 0.68% of one core (workload jobs excluded) | ✅ |
+| Service starts (installed), runs as LocalSystem in session 0, delayed auto-start, no visible windows | started in 1.9 s; first status after 6.4 s; 0 windowed processes | ✅ (pass 1) |
+| Helper at logon / presence | the service saw `active` from the session helper; the level was `constrained` (`user_active`, `cpu_pressure`) while the script ran | ✅ (pass 1) |
+| Workload managed by the service | the CPU validation workload ran `throttled` under `constrained` | ✅ |
+| Crash recovery as a real service | service restarted after 6.1 s; the workload resumed after 1.1 s from its checkpoint (unit 314) | ✅ |
+| **Service start after reboot** | `m15_service_acceptance.ps1 -AfterReboot` | ⏳ **pass 2 not run yet** |
+| E1: CUDA from the service vs a child worker vs a session worker | **as SYSTEM:** service process ✅ (context 110 ms, 20 ms kernels); service child worker ✅ (799 ms); worker in the interactive session as SYSTEM ✅ (4.1 s); worker as the logged-in *user* ❌ "probe produced no result" (exit 1, not investigated: UDCS never runs work as the student, so this arrangement is excluded by design) | ✅ for the arrangements UDCS uses |
+| **Isolation from the service** (M2, ADR 0001) | `m2_isolation_service_acceptance.ps1` | ✅ see below |
 
 ## Hardware / driver support matrix
 
@@ -107,3 +112,32 @@ _3 trials each, 0 missed. "Student arrives" = a presence change delivered as a s
 | Time-only hysteresis, so Defender spikes kept the node constrained forever | smoothed signal plus separate enter (50%) and exit (35%) thresholds |
 | Exit threshold applied to the cautious start-up level | the exit threshold applies only to pressure actually detected |
 | 25 adversarial-review findings, 2 of them high-severity | all fixed (see `DEVELOPMENT_STATUS.md`) |
+
+## Isolation from the installed service (M2, ADR 0001), 2026-11-22
+
+`tools/acceptance/m2_isolation_service_acceptance.ps1`, raw data `data/m2-isolation-service.json` (host and user names redacted). **PASSED.**
+
+**Run context:** the self-test ran inside the UDCSAgent service, as `NT AUTHORITY\SYSTEM` in session 0, on build 22000.
+
+| Check | Result |
+|---|---|
+| Permitted operations (read the approved input, read the runtime, write its own output) | ✅ all allowed |
+| Prohibited operations | ✅ all 16 denied (see the list below) |
+| Unsandboxed control | **for every one of the 16, the SYSTEM control was able to do it**, so each denial is meaningful on the service path |
+| Token | AppContainer, low integrity (RID 4096), privileges only `SeChangeNotifyPrivilege`, although the parent is LocalSystem |
+| Environment | only `LOCALAPPDATA`, `SYSTEMROOT`, `TEMP`, `TMP`, `USERPROFILE` |
+| Process-tree kill | ✅ all 4 job members ended |
+| CUDA inside the sandbox | `cuInit` OK, 1 device |
+| AppContainer detection under the service | verified (263 ms) |
+
+The 16 prohibited operations were:
+- external TCP, loopback TCP and DNS;
+- listing the forbidden directory and the user's profile;
+- opening the agent process to terminate it or read its memory, terminating a host helper process, and reading lsass memory;
+- reading the agent credential, another workload's file and an outside secret;
+- an HKCU secret;
+- writing the approved input, another workload's file and the runtime code.
+
+The SYSTEM control could open lsass, which as a normal user it could not.
+
+**Caveat:** this install was not enrolled, so `read:agent_credential` used a stand-in file in the same protected `ProgramData\UDCS\agent` tree (same ACL), not a real DPAPI credential.

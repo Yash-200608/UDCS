@@ -1,6 +1,6 @@
 # ADR 0001: Workload isolation backend (decision D-3)
 
-- **Status:** accepted for implementation, 2026-11-22. **User code stays disabled** until the elevated service acceptance passes (see "Gate").
+- **Status:** accepted for implementation, 2026-11-22. Service-path gate passed the same day. **User code stays disabled** until gates 2 and 3 below are met.
 - **Scope:** how a UDCS workload process is contained on a Windows lab PC.
 
 ## Context
@@ -88,6 +88,6 @@ The GitHub Windows runner (an elevated administrator, build 26100) killed every 
 
 ## Gate before enabling user code
 
-1. `tools/acceptance/m2_isolation_service_acceptance.ps1` passes. It runs this self-test **from the installed service** (LocalSystem, session 0), where the parent really has SYSTEM privileges.
+1. ~~`tools/acceptance/m2_isolation_service_acceptance.ps1` passes from the installed service (LocalSystem, session 0).~~ **PASSED 2026-11-22.** All 16 prohibited operations were denied, and each was possible for the SYSTEM control (lsass included). The token was privilege-free despite the LocalSystem parent, and the tree kill worked (`docs/acceptance/data/m2-isolation-service.json`).
 2. A review of what ALL APPLICATION PACKAGES exposes on a lab image (Deep Freeze, Office, campus software).
 3. A user-code packaging design: inputs, outputs, dependencies and size limits.
