@@ -16,6 +16,14 @@ Invariants:
   working through a controller outage can renew first.
 - The node decides how much new work it will take (`NodeJobCapacity`, derived from
   its local protection envelope). The scheduler only chooses *which* jobs fit that offer.
+
+Concurrency (PostgreSQL; SQLite serializes writers and ignores row locks):
+- Every read-modify-write of a job row locks it (`FOR UPDATE`), so a node's report,
+  another node's lease reaper and a user's cancel cannot overwrite each other.
+- The reaper and candidate selection use `SKIP LOCKED`: they never wait on a row
+  another sync holds. Claimers therefore cannot deadlock, and two nodes never pick
+  the same candidate.
+- The claim UPDATE keeps `WHERE state = 'queued'` as a second, independent guard.
 """
 
 from __future__ import annotations
@@ -194,7 +202,9 @@ def reap_expired_leases(
     if now - controller_started_at < settings.job_lease:
         return 0  # just restarted: give nodes one lease period to renew first
     expired = db.scalars(
-        select(Job).where(Job.state.in_(ACTIVE_JOB_STATES), Job.lease_expires_at < now)
+        select(Job)
+        .where(Job.state.in_(ACTIVE_JOB_STATES), Job.lease_expires_at < now)
+        .with_for_update(skip_locked=True)  # a row being renewed right now is not expired
     ).all()
     for job in expired:
         _requeue(db, job, now=now, reason="lease expired (node unreachable)", settings=settings)
@@ -272,7 +282,7 @@ def sync_node_jobs(
 
     for report in request.reports:
         reported.add(report.job_id)
-        job = db.get(Job, report.job_id)
+        job = db.get(Job, report.job_id, with_for_update=True)
         current = (
             job is not None
             and job.node_id == node.id
@@ -304,7 +314,9 @@ def sync_node_jobs(
     # Assigned here but not reported: the agent never received the assignment (lost
     # response) or lost the job itself. Requeue now rather than wait for the lease.
     for job in db.scalars(
-        select(Job).where(Job.node_id == node.id, Job.state.in_(ACTIVE_JOB_STATES))
+        select(Job)
+        .where(Job.node_id == node.id, Job.state.in_(ACTIVE_JOB_STATES))
+        .with_for_update()
     ).all():
         if job.id not in reported:
             _requeue(db, job, now=now, reason="node no longer has this job", settings=settings)
@@ -341,6 +353,7 @@ def _assign(
         .where(Job.state == JobState.QUEUED, Job.kind.in_(sorted(kinds)))
         .order_by(Job.priority.desc(), Job.queued_at.asc())
         .limit(_CANDIDATE_WINDOW)
+        .with_for_update(skip_locked=True)  # concurrent syncs see disjoint candidates
     ).all()
     if not candidates:
         return []

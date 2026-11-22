@@ -132,6 +132,7 @@ def get_job(job_id: uuid.UUID, auth: SubmitJobs, request: Request, db: DbSession
 @router.post("/{job_id}/cancel", response_model=JobOut)
 def cancel(job_id: uuid.UUID, auth: SubmitJobs, request: Request, db: DbSession, now: Now):
     job = _visible_job(db, auth, job_id)
+    db.refresh(job, with_for_update=True)  # a concurrent node report must not undo this
     try:
         service.cancel_job(db, job, now=now, reason=f"by {auth.user.username}")
     except service.InvalidJobTransition as exc:

@@ -96,6 +96,13 @@ jobs:
           UDCS_REQUIRE_POSTGRES: "1"  # conftest fails instead of falling back to SQLite
         run: uv run pytest shared/tests controller/tests -v -rs
 
+      - name: Scheduler race tests on PostgreSQL (repeated to expose races)
+        env:
+          UDCS_TEST_DATABASE_URL: ${{ env.DB_URL }}
+          UDCS_REQUIRE_POSTGRES: "1"
+          UDCS_RACE_ROUNDS: "50"  # independent sessions, released together by a barrier
+        run: uv run pytest controller/tests/test_jobs_concurrency.py -q -rs
+
   test-windows:
     # Primary lab-machine platform: DPAPI, Job Objects, PDH, the governor and
     # the workload manager. Runs the whole suite on SQLite.
