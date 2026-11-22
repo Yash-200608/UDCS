@@ -364,6 +364,112 @@ def _restricted_token() -> wintypes.HANDLE:
         api.CloseHandle(own)
 
 
+# -- private window station / desktop -------------------------------------------------------
+#
+# AppContainer processes need access to the window station and desktop they start on, or
+# user32 initialisation fails (STATUS_DLL_INIT_FAILED, 0xC0000142). The interactive
+# WinSta0 grants AppContainers access; a service's session-0 window station does not.
+# CI (a service-hosted runner) hit exactly this. So workloads get their own window
+# station and desktop where possible, and a private desktop otherwise, with access granted
+# only to the UDCS runtime capability. They are then also off the student's desktop.
+
+_user32 = ctypes.WinDLL("user32", use_last_error=True)
+_proto(
+    _user32.CreateWindowStationW,
+    wintypes.HANDLE,
+    wintypes.LPCWSTR,
+    wintypes.DWORD,
+    wintypes.DWORD,
+    ctypes.c_void_p,
+)
+_proto(_user32.GetProcessWindowStation, wintypes.HANDLE)
+_proto(_user32.SetProcessWindowStation, wintypes.BOOL, wintypes.HANDLE)
+_proto(
+    _user32.CreateDesktopW,
+    wintypes.HANDLE,
+    wintypes.LPCWSTR,
+    ctypes.c_void_p,
+    ctypes.c_void_p,
+    wintypes.DWORD,
+    wintypes.DWORD,
+    ctypes.c_void_p,
+)
+_proto(
+    _user32.GetUserObjectInformationW,
+    wintypes.BOOL,
+    wintypes.HANDLE,
+    ctypes.c_int,
+    ctypes.c_void_p,
+    wintypes.DWORD,
+    ctypes.POINTER(wintypes.DWORD),
+)
+_WINSTA_ALL = 0x37F | 0x000F0000
+_DESKTOP_ALL = 0x01FF | 0x000F0000
+# What a windowless workload needs: enough for user32/gdi32 initialisation, no more.
+# Shared (service) window station: enumdesktops, readattributes, global atoms, enumerate,
+# READ_CONTROL. No clipboard, no screen reading, no desktop creation.
+_WINSTA_FOR_WORKLOADS = 0x0001 | 0x0002 | 0x0020 | 0x0100 | 0x00020000
+# Only UDCS workloads live on this private desktop, so they get full rights to it (user32
+# initialisation failed with narrower masks, measured). Nothing of the student or service.
+_DESKTOP_FOR_WORKLOADS = _DESKTOP_ALL
+_desktop_state: dict[str, object] = {}
+
+
+def _object_name(handle: int) -> str:
+    buf = ctypes.create_unicode_buffer(256)
+    needed = wintypes.DWORD()
+    api.check(
+        _user32.GetUserObjectInformationW(handle, 2, buf, ctypes.sizeof(buf), ctypes.byref(needed)),
+        "GetUserObjectInformationW",
+    )
+    return buf.value
+
+
+def _grant_window_object(handle: int, sid: str, mask: int) -> None:
+    import win32security as ws
+
+    sd = ws.GetSecurityInfo(int(handle), ws.SE_WINDOW_OBJECT, ws.DACL_SECURITY_INFORMATION)
+    dacl = sd.GetSecurityDescriptorDacl()
+    dacl.AddAccessAllowedAce(ws.ACL_REVISION, mask, ws.ConvertStringSidToSid(sid))
+    ws.SetSecurityInfo(
+        int(handle), ws.SE_WINDOW_OBJECT, ws.DACL_SECURITY_INFORMATION, None, None, dacl, None
+    )
+
+
+def workload_desktop(capability: str, *, name: str = "UDCSWorkloads") -> str:
+    """`winsta\\desktop` for workloads, created once per process. Handles stay open for
+    the life of the agent (closing the last one destroys the object)."""
+    cached = _desktop_state.get("path")
+    if isinstance(cached, str):
+        return cached
+    winsta = _user32.CreateWindowStationW(name, 0, _WINSTA_ALL, None)
+    own_winsta = bool(winsta)
+    if own_winsta:  # LocalSystem (the service): a private window station
+        _grant_window_object(winsta, capability, _WINSTA_ALL)  # holds only workloads
+        previous = _user32.GetProcessWindowStation()
+        api.check(_user32.SetProcessWindowStation(winsta), "SetProcessWindowStation")
+        try:
+            desktop = _user32.CreateDesktopW("Workloads", None, None, 0, _DESKTOP_ALL, None)
+        finally:
+            _user32.SetProcessWindowStation(previous)
+        station_name = name
+    else:  # no right to create window stations: a private desktop on the current one
+        current = _user32.GetProcessWindowStation()
+        station_name = _object_name(current)
+        if station_name.lower() != "winsta0":
+            # A service's window station (e.g. Service-0x0-3e7$) grants AppContainers
+            # nothing. The interactive WinSta0 already does, and the student's window
+            # station is never modified.
+            _grant_window_object(current, capability, _WINSTA_FOR_WORKLOADS)
+        desktop = _user32.CreateDesktopW(name, None, None, 0, _DESKTOP_ALL, None)
+    if not desktop:
+        raise api.WinApiError("CreateDesktopW")
+    _grant_window_object(desktop, capability, _DESKTOP_FOR_WORKLOADS)
+    path = f"{station_name}\\{'Workloads' if own_winsta else name}"
+    _desktop_state.update(path=path, winsta=winsta, desktop=desktop, private_station=own_winsta)
+    return path
+
+
 def set_ui_restrictions(job: JobObject) -> None:
     """No clipboard, desktop, global atoms or handles of other processes' windows."""
     limits = JOBOBJECT_BASIC_UI_RESTRICTIONS(UI_RESTRICT_ALL)
@@ -383,6 +489,7 @@ def launch_in_appcontainer(
     cwd: Path,
     env: dict[str, str],
     memory_priority: int = api.MEMORY_PRIORITY_VERY_LOW,
+    desktop: str | None = None,
 ) -> LaunchedProcess:
     """Create the process suspended, inside the AppContainer *and* the job, then resume.
     Any failure raises: there is no fallback to an unrestricted process."""
@@ -444,6 +551,9 @@ def launch_in_appcontainer(
         startup = STARTUPINFOEXW()
         startup.StartupInfo.cb = ctypes.sizeof(startup)
         startup.lpAttributeList = ctypes.cast(attr_list, ctypes.c_void_p)
+        desktop_name = ctypes.create_unicode_buffer(desktop) if desktop else None
+        if desktop_name is not None:
+            startup.StartupInfo.lpDesktop = ctypes.cast(desktop_name, wintypes.LPWSTR)
         command_line = ctypes.create_unicode_buffer(subprocess.list2cmdline(argv))
         block = _environment_block(env)
         flags = (

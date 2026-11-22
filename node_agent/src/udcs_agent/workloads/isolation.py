@@ -151,6 +151,7 @@ class AppContainerIsolation:
                 ac.SandboxSpec(package, (capability,), lpac=False),
                 cwd=workdir,
                 env=env,
+                desktop=ac.workload_desktop(capability),
             )
         except OSError as exc:
             raise IsolationUnavailable(f"AppContainer launch failed: {exc}") from exc

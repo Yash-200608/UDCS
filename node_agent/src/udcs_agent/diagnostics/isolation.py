@@ -71,6 +71,7 @@ def _verify_appcontainer(lpac: bool) -> tuple[bool, str]:
             ac.SandboxSpec(sid, (), lpac=lpac),
             cwd=cmd.parent,
             env={"SystemRoot": os.environ.get("SystemRoot", r"C:\Windows")},
+            desktop=ac.workload_desktop(ac.capability_sid(ac.RUNTIME_CAPABILITY)),
         )
         code = process.wait(15)
         process.close()
