@@ -190,15 +190,33 @@ def test_many_agents_many_jobs_every_job_claimed_exactly_once(app, setup, round_
     with CandidateBarrier(app.state.engine, parties=len(nodes)) as gate:
         results = _race(app, nodes, _offer(2))
     assert gate.arrived == len(nodes)
+    held: dict[uuid.UUID, list] = {n: list(r.assignments) for n, r in results.items()}
     for response in results.values():
         claimed += [a.job_id for a in response.assignments]
     assert len(claimed) == len(set(claimed)), "a job was handed to two agents"
     # SKIP LOCKED may leave a job for a later sync; nothing is ever lost or duplicated.
+    # Like real agents, each keeps reporting what it holds: an unreported job counts as
+    # lost and is (correctly) requeued.
     for _ in range(5):
         if len(claimed) >= len(job_ids):
             break
         for node in nodes:
-            claimed += [a.job_id for a in _sync(app, node, _offer(2)).assignments]
+            request = JobSyncRequest(
+                protocol_version=PROTOCOL_VERSION,
+                reports=[
+                    AgentJobReport(
+                        job_id=a.job_id,
+                        attempt=a.attempt,
+                        state=LocalJobState.WAITING,
+                        units_done=0,
+                    )
+                    for a in held[node]
+                ],
+                capacity=_offer(2).capacity,
+            )
+            new = _sync(app, node, request).assignments
+            held[node] += new
+            claimed += [a.job_id for a in new]
     assert sorted(claimed) == sorted(job_ids)
     with app.state.sessionmaker() as db:
         rows = db.scalars(select(Job).where(Job.id.in_(job_ids))).all()
