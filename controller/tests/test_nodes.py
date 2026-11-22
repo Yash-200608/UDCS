@@ -238,11 +238,21 @@ def test_resource_summary_aggregates_without_identities(
     assert "lab-a-01" not in response.text and "10.20.30.40" not in response.text
 
 
-def test_audit_log_lists_events_newest_first(client, admin_headers, enroll):
-    enroll()
+def test_audit_log_lists_events_newest_first(
+    client, admin_headers, enroll, new_enrollment_token, clock
+):
+    # Distinct timestamps: with a frozen clock the order of tied events is undefined, and
+    # SQLite and PostgreSQL legitimately return them in different orders.
+    clock.advance(seconds=1)
+    token = new_enrollment_token()
+    clock.advance(seconds=1)
+    enroll(token=token)
     events = client.get(f"{API}/admin/audit-events", headers=admin_headers).json()
     actions = [e["action"] for e in events]
     assert actions[0] == "node.enrolled"
+    assert actions.index("enrollment_key.created") < actions.index("auth.login_succeeded")
+    stamps = [e["created_at"] for e in events]
+    assert stamps == sorted(stamps, reverse=True)
     assert "enrollment_key.created" in actions and "auth.login_succeeded" in actions
     assert all(
         "token" not in str(e["details"]).lower() or "token_id" in str(e["details"]) for e in events

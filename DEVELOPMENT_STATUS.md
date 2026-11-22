@@ -118,6 +118,7 @@ Not covered by this run:
 3. There is no password reset, MFA or SSO. University SSO should be decided before onboarding students.
 4. Re-enrolling a machine creates a new node record. A node that lies in its inventory is still accepted; verification is planned for M3.
 5. The session helper is a Python process (memory cost; D-2 is open).
+7. **Audit events with equal timestamps have no chronological order.** The listing now breaks ties by id, so the order is deterministic but not chronological. PostgreSQL CI exposed this: SQLite had been returning tied rows in insertion order by accident. The proper fix is a strict sequence column (a schema change, and the basis for T9 hash-chaining). That is a founder decision.
 6. The threat model's T10 (malicious workload escape) is **open**. M2 must not start without an isolation decision.
 
 ## Decisions awaiting the founder

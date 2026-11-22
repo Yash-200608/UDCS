@@ -38,7 +38,12 @@ def list_audit_events(
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
     action: Annotated[str | None, Query(max_length=64)] = None,
 ) -> list[AuditEventOut]:
-    query = select(AuditEvent).order_by(AuditEvent.created_at.desc()).limit(limit)
+    # The id tie-break makes the order deterministic across databases when timestamps are
+    # equal. It is not chronological within a tie; a strict sequence column is a design
+    # decision that is still open (see DEVELOPMENT_STATUS.md).
+    query = (
+        select(AuditEvent).order_by(AuditEvent.created_at.desc(), AuditEvent.id.desc()).limit(limit)
+    )
     if action is not None:
         query = query.where(AuditEvent.action == action)
     return [AuditEventOut.model_validate(e) for e in db.scalars(query)]
