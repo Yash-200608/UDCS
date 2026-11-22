@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+# local runtime data (databases, agent state, certs) — never commit
+var/
+*.db
+*.sqlite3
+*.pem
+*.key
+.env
+.env.*
