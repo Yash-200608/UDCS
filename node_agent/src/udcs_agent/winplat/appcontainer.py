@@ -340,7 +340,28 @@ class SandboxSpec:
     lpac: bool = True  # also ignore ALL APPLICATION PACKAGES grants
 
 
-def _restricted_token() -> wintypes.HANDLE:
+def _fix_owner_and_default_dacl(token: int, package_sid: str) -> None:
+    """An elevated administrator's (and LocalSystem's) token names the Administrators
+    group as owner and in its default DACL. With that group deny-only, the new process
+    cannot open its own process and thread objects, so its DLLs fail to initialise
+    (0xC0000142, measured on the CI runner). Owner and default DACL are therefore set to
+    the user SID, SYSTEM and the workload's own package SID."""
+    import ntsecuritycon as con
+    import win32security as ws
+
+    user_sid, _attrs = ws.GetTokenInformation(token, ws.TokenUser)
+    ws.SetTokenInformation(token, ws.TokenOwner, user_sid)
+    dacl = ws.ACL()
+    for sid in (
+        user_sid,
+        ws.ConvertStringSidToSid("S-1-5-18"),
+        ws.ConvertStringSidToSid(package_sid),
+    ):
+        dacl.AddAccessAllowedAce(ws.ACL_REVISION, con.GENERIC_ALL, sid)
+    ws.SetTokenInformation(token, ws.TokenDefaultDacl, dacl)
+
+
+def _restricted_token(package_sid: str | None = None) -> wintypes.HANDLE:
     own = wintypes.HANDLE()
     api.check(
         _advapi.OpenProcessToken(
@@ -358,6 +379,12 @@ def _restricted_token() -> wintypes.HANDLE:
             ),
             "CreateRestrictedToken",
         )
+        if package_sid is not None:
+            try:
+                _fix_owner_and_default_dacl(restricted.value, package_sid)
+            except Exception:
+                api.CloseHandle(restricted)
+                raise
         return restricted
     finally:
         admins.close()
@@ -506,7 +533,7 @@ def launch_in_appcontainer(
             env[key] = os.environ[key]
     package = _Sid(sandbox.package_sid)
     caps = [_Sid(s) for s in sandbox.capability_sids]
-    token = _restricted_token()
+    token = _restricted_token(sandbox.package_sid)
     attr_list = None
     info = api.PROCESS_INFORMATION()
     try:
