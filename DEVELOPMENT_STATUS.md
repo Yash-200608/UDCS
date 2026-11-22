@@ -68,7 +68,7 @@ _Last updated: 2026-11-22. Development checkpoint on branch `feature/udcs-backgr
 | Component | State | Evidence |
 |---|---|---|
 | Job contracts (catalog spec, sync request and response, result checksum) | tested | `udcs_shared/jobs.py`; controller and agent tests |
-| `jobs` and `job_logs` tables, migration `0003` | tested on SQLite; PostgreSQL in CI (pending the next CI run) | schema-matches-models check, migration round trip |
+| `jobs` and `job_logs` tables, migration `0003` | tested on SQLite and PostgreSQL 16 (CI) | schema-matches-models check, migration round trip |
 | Job API: submit, list, get, cancel, logs, result; per-user limit; admin-only priority; node placement hidden from users | tested | `controller/tests/test_jobs.py` (13) |
 | Pull scheduler: offer-constrained kinds, slots and memory; GPU only on GPU-inventory nodes; GPU-first on GPU nodes; per-user fair share; atomic claim | tested, sequentially | `test_jobs.py`; **concurrent claims are untested** |
 | Leases, requeue, fencing (stale attempt or wrong node), restart grace, failure and requeue limits, lost assignments | tested (3 of 4 key mutations killed; the claim-guard mutation survives) | `test_jobs.py` |
@@ -87,7 +87,7 @@ Test run, 2026-11-22 (local, Windows 11): **192 passed** (full suite, 6 min), an
 
 CI on the feature branch, run 44990049659:
 - **PostgreSQL:** 70/70, which includes migration 0003 and every job scheduler test.
-- **Windows:** 190 passed and 1 failed. The e2e cancel test waited 60 s for a job to start, but a fresh agent's deliberate start-up caution (≥ 30 s of calm, restarted by noise) took longer on the runner. The waits now allow for it; the next CI result is still pending.
+- **Windows:** 190 passed and 1 failed. The e2e cancel test waited 60 s for a job to start, but a fresh agent's deliberate start-up caution (≥ 30 s of calm, restarted by noise) took longer on the runner. The waits now allow for it, and the next run, [44990617979](https://github.com/Yash-200608/UDCS/actions/runs/44990617979), is **all green**: lint; PostgreSQL 70/70; Windows 191 passed, 1 skipped (no NVIDIA driver), including the 4 e2e pipeline tests.
 
 Bugs found and fixed while building it:
 - **CPU time was lost for short jobs:** they finished between syncs, so the manager now keeps cumulative CPU per workload.
