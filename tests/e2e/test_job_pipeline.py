@@ -30,6 +30,10 @@ from udcs_agent.jobs import workload_id
 pytestmark = [pytest.mark.e2e, pytest.mark.skipif(sys.platform != "win32", reason="Windows")]
 
 LEASE = 30
+# A freshly started agent starts at CONSTRAINED and offers no work until it has seen
+# 30 s of continuous calm (by design: student first). Noise restarts that timer, so
+# waits for a job to *start* allow for several of those windows.
+START_WAIT = 240
 RESEARCHER_PASSWORD = "researcher-password-e2e"
 
 
@@ -132,7 +136,9 @@ def test_jobs_are_distributed_executed_and_verified_across_two_nodes(cluster):
     for node in c.nodes:
         node.start()
     jobs = [_submit(c, units=30) for _ in range(4)]
-    finished = _wait(lambda: all(_job(c, j)["state"] == "succeeded" for j in jobs), timeout=180)
+    finished = _wait(
+        lambda: all(_job(c, j)["state"] == "succeeded" for j in jobs), timeout=START_WAIT + 120
+    )
     assert finished, (
         f"not all succeeded: {[(_job(c, j)['state'], _job(c, j)['error']) for j in jobs]}"
     )
@@ -159,7 +165,7 @@ def test_cancel_stops_the_workload_on_the_node(cluster):
     node = c.nodes[0]
     node.start()
     job_id = _submit(c, units=100_000)  # far longer than the test
-    assert _wait(lambda: _job(c, job_id)["units_done"] > 0, timeout=60), _job(c, job_id)
+    assert _wait(lambda: _job(c, job_id)["units_done"] > 0, timeout=START_WAIT), _job(c, job_id)
     assert c.http.post(f"/jobs/{job_id}/cancel", headers=c.user).status_code == 200
     workdir = node.data_dir / "workloads" / workload_id(uuid.UUID(job_id))
     assert _wait(lambda: not workdir.exists(), timeout=40), "cancelled workload still on node"
@@ -171,10 +177,10 @@ def test_agent_restart_resumes_the_same_attempt_from_its_checkpoint(cluster):
     node = c.nodes[0]
     node.start()
     job_id = _submit(c, units=200)  # ~10 s of work at full speed
-    assert _wait(lambda: _job(c, job_id)["units_done"] >= 50, timeout=90), _job(c, job_id)
+    assert _wait(lambda: _job(c, job_id)["units_done"] >= 50, timeout=START_WAIT), _job(c, job_id)
     node.stop()  # service stop: workloads are terminated, checkpoints remain
     node.start()  # service start: the same attempt resumes from its checkpoint
-    done = _wait(lambda: _job(c, job_id)["state"] == "succeeded", timeout=120)
+    done = _wait(lambda: _job(c, job_id)["state"] == "succeeded", timeout=START_WAIT)
     job = _job(c, job_id)
     assert done, job
     assert job["attempt"] == 1 and job["requeues"] == 0, "resumed, not rescheduled"
@@ -188,11 +194,11 @@ def test_lost_node_job_is_requeued_and_finished_elsewhere(cluster):
     first, second = c.nodes
     first.start()
     job_id = _submit(c, units=200)
-    assert _wait(lambda: _job(c, job_id)["units_done"] > 0, timeout=90), _job(c, job_id)
+    assert _wait(lambda: _job(c, job_id)["units_done"] > 0, timeout=START_WAIT), _job(c, job_id)
     assert _job(c, job_id, admin=True)["node_id"] == first.node_id
     first.stop()  # the PC is switched off mid-job and never comes back
     second.start()
-    done = _wait(lambda: _job(c, job_id)["state"] == "succeeded", timeout=LEASE * 4 + 90)
+    done = _wait(lambda: _job(c, job_id)["state"] == "succeeded", timeout=LEASE * 4 + START_WAIT)
     job = _job(c, job_id, admin=True)
     assert done, job
     assert job["node_id"] == second.node_id and job["attempt"] == 2 and job["requeues"] == 1

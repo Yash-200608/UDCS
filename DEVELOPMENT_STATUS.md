@@ -85,9 +85,39 @@ Test run, 2026-11-22 (local, Windows 11): **192 passed** (full suite, 6 min), an
 - **Intermittent failures.** In an earlier full run, `test_memory_class_is_paused_while_a_student_is_active` and the e2e cancel test each failed once. Neither reproduced in isolated reruns (3×) or in the next full run.
 - **Cause.** Not identified. The suspicion is timing under load, because both wait on real process start and stop. Treat them as **known flaky** until explained.
 
+CI on the feature branch, run 44990049659:
+- **PostgreSQL:** 70/70, which includes migration 0003 and every job scheduler test.
+- **Windows:** 190 passed and 1 failed. The e2e cancel test waited 60 s for a job to start, but a fresh agent's deliberate start-up caution (≥ 30 s of calm, restarted by noise) took longer on the runner. The waits now allow for it; the next CI result is still pending.
+
 Bugs found and fixed while building it:
 - **CPU time was lost for short jobs:** they finished between syncs, so the manager now keeps cumulative CPU per workload.
 - **Cancelled workload directories survived:** Windows would not delete a just-terminated process's working directory, so the manager now waits for the exit and retries the purge.
+
+### M2a engineering review
+
+**Achieved and verified:**
+- A job submitted over HTTPS is scheduled by pull, run under local protection in a Job Object on a real agent, reported back with progress, CPU, memory and lifecycle logs, and returned as a result the controller verifies.
+- Recovery is verified for four cases: agent restart (resume, same attempt); a lost node (lease → requeue → another node); a lost assignment; and controller restart (grace).
+
+**Weak or unverified:**
+- the agent under the real service;
+- separate machines;
+- concurrent claims;
+- the result checksum is not attestation;
+- the requeue restarts from zero, because checkpoints stay on the node;
+- logs are lifecycle-only;
+- the start-up delay before a node takes work;
+- 2 intermittently failing tests.
+
+**Tech debt:**
+- `jobs/service.py` holds both lifecycle and scheduling (about 400 lines). Split it when the scheduler grows (quotas, preemption).
+- Lazy reaping should become a periodic task if a UI needs fresh states without polling.
+
+**Next, in priority order:**
+1. The elevated service acceptance, now including the pipeline.
+2. A concurrency test of the claim on PostgreSQL (two connections).
+3. Checkpoint upload or migration, so requeued work need not restart.
+4. The D-3 isolation decision, which unblocks user code.
 
 ## Acceptance gates still open for M1.5
 

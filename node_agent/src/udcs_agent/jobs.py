@@ -87,6 +87,7 @@ class JobSync:
         self._assignments: dict[str, dict[str, Any]] = self._load()
         self._log_cursor: dict[str, float] = {}  # manager event times are per-process
         self._pending_cursor: dict[str, float] = {}
+        self._last_offer = ""
 
     # -- persistence ---------------------------------------------------------------------------
 
@@ -172,9 +173,12 @@ class JobSync:
                 )
                 continue
             reports.append(self._report(job_id, entry, item, now))
-        return JobSyncRequest(
-            protocol_version=PROTOCOL_VERSION, reports=reports, capacity=self.capacity()
-        )
+        capacity = self.capacity()
+        offer = "accepting" if capacity.accept else f"no new work: {capacity.reason}"
+        if offer != self._last_offer:  # log changes only, not every sync
+            logger.info("job offer: %s", offer)
+            self._last_offer = offer
+        return JobSyncRequest(protocol_version=PROTOCOL_VERSION, reports=reports, capacity=capacity)
 
     def _report(
         self, job_id: str, entry: dict[str, Any], item: dict[str, Any], now: float

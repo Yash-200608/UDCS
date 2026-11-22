@@ -81,6 +81,7 @@ This is deliberately simple. It does not yet do any of the following:
 - **Delivery is at-least-once.** During a network partition a node can keep running a job that has already been reassigned, so the work is done twice. Only the current attempt's result is accepted.
 - **The checksum detects bugs, not cheating.** A malicious node can compute it without doing the work. Result attestation is open (T26, with T6).
 - **Concurrency of the claim is not tested.** It relies on the conditional UPDATE. No test runs two real concurrent transactions, and a mutation that removes the `state = 'queued'` guard is not caught by the suite.
+- **A freshly started agent takes no work for at least 30 s.** This is by design: the governor starts at CONSTRAINED and offers work only after 30 s of continuous calm, and any noise restarts the timer. After a reboot a lab PC therefore joins the pool with a delay, and the agent logs each `job offer:` change. CI exposed this: an e2e wait of 60 s was too short on a noisy runner.
 - **Short jobs report coarsely.** Progress arrives once per heartbeat (default 15 s). A job shorter than that can go straight from `assigned` to `succeeded`.
 - **Job logs are lifecycle events only:** started, paused, evicted, completed and similar. Catalog workloads print nothing else, and stdout capture belongs with user code (D-3).
 - **Lease reaping is lazy.** It happens on node syncs and on job reads, so a fleet with no syncing node and no readers does not reap. That is harmless, because no node could run the work anyway.
