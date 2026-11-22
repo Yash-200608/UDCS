@@ -17,23 +17,18 @@ disabled step (USER_CODE_ENABLED in udcs_agent.jobs).
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import os
 import shutil
 import stat
 import sys
-import zlib
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
 
 from udcs_shared.packages import (
-    CHUNK_ENCODING_HEADER,
-    CHUNK_RAW_SIZE_HEADER,
-    CHUNK_SHA256_HEADER,
     OutputFile,
     OutputManifest,
     PackageKind,
@@ -41,35 +36,39 @@ from udcs_shared.packages import (
     canonical_json,
     path_problem,
 )
+from udcs_shared.transfer import (
+    BLOCK as _BLOCK,
+)
+from udcs_shared.transfer import (
+    FILE_ATTRIBUTE_REPARSE_POINT,
+    TransferError,
+    VerificationError,
+    manifest_from_dir,
+    sha256_file,
+)
+
+# A module global on purpose: collect_outputs and stage_package look it up here, so a
+# test can replace it to simulate a path check that a race has already defeated.
+from udcs_shared.transfer import is_reparse as _is_reparse
+from udcs_shared.transfer_http import ChunkedUploader, UploadStats, download_verified
+
+__all__ = [
+    "ChunkedUploader",
+    "NodeCache",
+    "StagedJob",
+    "TransferError",
+    "UploadStats",
+    "VerificationError",
+    "collect_outputs",
+    "fetch_blob",
+    "manifest_from_dir",
+    "remove_staging",
+    "sha256_file",
+    "stage_package",
+    "staging_dir",
+]
 
 logger = logging.getLogger(__name__)
-
-_BLOCK = 1 << 20
-FILE_ATTRIBUTE_REPARSE_POINT = 0x400
-
-
-class TransferError(OSError):
-    pass
-
-
-class VerificationError(TransferError):
-    """Content does not match its SHA-256. Never retried into acceptance."""
-
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with open(path, "rb") as handle:
-        while block := handle.read(_BLOCK):
-            digest.update(block)
-    return digest.hexdigest()
-
-
-def _is_reparse(path: Path) -> bool:
-    try:
-        attrs = os.lstat(path).st_file_attributes  # type: ignore[attr-defined]
-    except AttributeError:  # not Windows
-        return os.path.islink(path)
-    return bool(attrs & FILE_ATTRIBUTE_REPARSE_POINT)
 
 
 # -- opening files without following links ---------------------------------------------------
@@ -227,110 +226,6 @@ def _inside(path: Path, root: Path) -> bool:
     return common == os.path.normcase(root)
 
 
-# -- upload -----------------------------------------------------------------------------------
-
-
-@dataclass
-class UploadStats:
-    sha256: str
-    size: int
-    sent_bytes: int = 0
-    skipped: bool = False
-    resumed_from: int = 0
-
-
-class ChunkedUploader:
-    """`prefix` is "/blobs" (users) or "/agent/blobs" (nodes; `extra` names the job and
-    attempt, so output uploads are fenced like every other node write)."""
-
-    def __init__(
-        self,
-        http: httpx.Client,
-        *,
-        prefix: str = "/blobs",
-        extra: dict | None = None,
-        compress: bool = True,
-        retries: int = 5,
-    ) -> None:
-        self.http = http
-        self.prefix = prefix
-        self.extra = extra or {}
-        self.compress = compress
-        self.retries = retries
-
-    @staticmethod
-    def _check(response: httpx.Response) -> httpx.Response:
-        if response.status_code >= 400:
-            raise TransferError(f"HTTP {response.status_code}: {response.text[:200]}")
-        return response
-
-    def upload(
-        self,
-        path: Path,
-        *,
-        sha256: str | None = None,
-        on_chunk: Callable[[int], None] | None = None,
-    ) -> UploadStats:
-        size = path.stat().st_size
-        sha256 = sha256 or sha256_file(path)
-        stats = UploadStats(sha256=sha256, size=size)
-        start = self._check(
-            self.http.post(
-                f"{self.prefix}/uploads", json={"sha256": sha256, "size": size, **self.extra}
-            )
-        ).json()
-        if start["upload_id"] is None:
-            stats.skipped = True  # already ours: no bytes need to move
-            return stats
-        upload_id, chunk = start["upload_id"], int(start["chunk_bytes"])
-        offset = stats.resumed_from = int(start["received"])
-        failures = 0
-        with open(path, "rb") as handle:
-            while offset < size:
-                handle.seek(offset)
-                raw = handle.read(min(chunk, size - offset))
-                body, encoding = raw, "identity"
-                if self.compress:
-                    packed = zlib.compress(raw, 6)
-                    if len(packed) < len(raw) * 0.9:
-                        body, encoding = packed, "zlib"
-                headers = {
-                    CHUNK_SHA256_HEADER: hashlib.sha256(raw).hexdigest(),
-                    CHUNK_ENCODING_HEADER: encoding,
-                    CHUNK_RAW_SIZE_HEADER: str(len(raw)),
-                }
-                try:
-                    response = self.http.put(
-                        f"{self.prefix}/uploads/{upload_id}",
-                        params={"offset": offset},
-                        content=body,
-                        headers=headers,
-                    )
-                except httpx.TransportError:
-                    response = None
-                if response is not None and response.status_code < 400:
-                    offset = int(response.json()["received"])
-                    stats.sent_bytes += len(body)
-                    failures = 0
-                    if on_chunk:
-                        on_chunk(offset)
-                    continue
-                failures += 1
-                if failures > self.retries or (
-                    response is not None and response.status_code in (413, 415, 422)
-                ):
-                    detail = response.text[:200] if response is not None else "network"
-                    raise TransferError(f"chunk at {offset} failed: {detail}")
-                # Interrupted: ask the server how far it really got, then continue there.
-                status = self._check(self.http.get(f"{self.prefix}/uploads/{upload_id}")).json()
-                offset = int(status["received"])
-        done = self.http.post(f"{self.prefix}/uploads/{upload_id}/complete")
-        if done.status_code == 422:
-            raise VerificationError(done.text[:200])
-        self._check(done)
-        return stats
-
-
 # -- download into the node cache -------------------------------------------------------------
 
 
@@ -363,36 +258,8 @@ def fetch_blob(
     target = cache.path(sha256)
     if target.is_file():
         return target, 0
-    target.parent.mkdir(parents=True, exist_ok=True)
     partial = target.with_suffix(".part")
-    moved = 0
-    for _ in range(retries + 1):
-        have = partial.stat().st_size if partial.exists() else 0
-        if have > size:
-            partial.unlink()
-            have = 0
-        if have < size:
-            headers = {"Range": f"bytes={have}-"} if have else {}
-            try:
-                with http.stream("GET", url, params=params, headers=headers) as response:
-                    if response.status_code not in (200, 206):
-                        raise TransferError(f"HTTP {response.status_code} for blob {sha256[:12]}")
-                    mode = "ab" if response.status_code == 206 else "wb"
-                    with open(partial, mode) as handle:
-                        for block in response.iter_bytes(_BLOCK):
-                            handle.write(block)
-                            moved += len(block)
-                            if handle.tell() > size:
-                                raise VerificationError("server sent more bytes than declared")
-            except httpx.TransportError:
-                continue  # resume from what arrived
-        if partial.exists() and partial.stat().st_size == size:
-            break
-    else:
-        raise TransferError(f"blob {sha256[:12]} incomplete after retries")
-    if sha256_file(partial) != sha256:
-        partial.unlink(missing_ok=True)
-        raise VerificationError(f"blob {sha256[:12]} does not match its sha256")
+    moved = download_verified(http, url, sha256, size, partial, params=params, retries=retries)
     os.replace(partial, target)
     return target, moved
 
@@ -601,43 +468,3 @@ def collect_outputs(
         raise
     found.sort(key=lambda f: f.path)
     return OutputManifest(attempt=attempt, files=found), paths
-
-
-def manifest_from_dir(
-    directory: Path,
-    *,
-    kind: PackageKind = PackageKind.PACKAGE,
-    name: str,
-    version: str,
-    entry: str | None = None,
-    **fields,
-) -> tuple[PackageManifest, dict[str, Path]]:
-    """Client side: build a deterministic manifest. Symlinks and reparse points are
-    refused, never followed."""
-    files = []
-    paths: dict[str, Path] = {}
-    for root, dirs, names in os.walk(directory):
-        for d in list(dirs):
-            if _is_reparse(Path(root) / d):
-                raise VerificationError(f"refusing symlink/reparse point {d!r}")
-        for n in names:
-            path = Path(root) / n
-            if _is_reparse(path) or not path.is_file():
-                raise VerificationError(f"refusing symlink/reparse point or special file {n!r}")
-            relative = path.relative_to(directory).as_posix()
-            files.append(
-                {"path": relative, "sha256": sha256_file(path), "size": path.stat().st_size}
-            )
-            paths[relative] = path
-    files.sort(key=lambda f: f["path"])
-    body = {
-        "schema_version": 1,
-        "kind": kind.value,
-        "name": name,
-        "version": version,
-        "files": files,
-    }
-    if entry is not None:
-        body["entry"] = {"script": entry}
-    body.update(fields)
-    return PackageManifest.model_validate(json.loads(json.dumps(body))), paths

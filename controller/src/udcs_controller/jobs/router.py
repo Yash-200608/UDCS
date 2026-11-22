@@ -68,6 +68,7 @@ def to_out(job: Job, *, show_node: bool) -> JobOut:
         memory_bytes=job.memory_bytes,
         error=job.error,
         node_id=job.node_id if show_node else None,
+        package=job.package_digest,
     )
 
 
@@ -179,12 +180,17 @@ def logs(
     auth: SubmitJobs,
     db: DbSession,
     limit: Annotated[int, Query(ge=1, le=1000)] = 200,
+    after: Annotated[int | None, Query(ge=0, description="only lines with a larger id")] = None,
 ) -> list[JobLogOut]:
     job = _visible_job(db, auth, job_id)
-    rows = db.scalars(
-        select(JobLog).where(JobLog.job_id == job.id).order_by(JobLog.id.asc()).limit(limit)
-    )
-    return [JobLogOut(at=r.at, attempt=r.attempt, source=r.source, message=r.message) for r in rows]
+    query = select(JobLog).where(JobLog.job_id == job.id)
+    if after is not None:
+        query = query.where(JobLog.id > after)
+    rows = db.scalars(query.order_by(JobLog.id.asc()).limit(limit))
+    return [
+        JobLogOut(id=r.id, at=r.at, attempt=r.attempt, source=r.source, message=r.message)
+        for r in rows
+    ]
 
 
 @router.get("/{job_id}/result", response_model=JobResultOut)

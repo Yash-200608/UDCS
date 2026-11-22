@@ -5,6 +5,10 @@ description = "UDCS wire contracts shared by the controller and node agent"
 requires-python = ">=3.11"
 dependencies = ["pydantic>=2.9,<3"]
 
+[project.optional-dependencies]
+# HTTP transfer (udcs_shared.transfer_http): the agent and the researcher client; not the controller.
+http = ["httpx>=0.28,<1"]
+
 [build-system]
 requires = ["uv_build>=0.8,<0.12"]
 build-backend = "uv_build"

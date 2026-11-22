@@ -209,3 +209,52 @@ Adversarial review in three lenses: transfer and CAS; staging and outputs; depen
 - **Chunked checkpoints** over 1 MiB (deferred earlier).
 - **A standalone client tool:** the uploader currently lives in the agent package.
 - **Integrity against a dishonest node:** reported outputs are hashed, but a node can fabricate them (T26).
+
+## Researcher client (`udcs`), 2026-11-23
+
+**Guide:** [docs/guides/researcher-client.md](../guides/researcher-client.md). Execution **remains disabled**. The client never works around that:
+- while `GET /deployment` reports `user_code_enabled: false`, `udcs submit` uploads and registers the package (the controller validates it), prints that **no job was created**, exits 3, and sends no `POST /jobs`;
+- there is no client flag, environment variable or "pending" state that changes this.
+
+**Design.** Three independent designs (security-first, researcher-first, minimal) were judged against the code and combined. The judge caught real errors before any code was written, for example that the agent's DPAPI was machine-scoped, so a researcher token stored with it would be readable by every account on a shared PC.
+
+**Layout:**
+- `client/` (package `udcs-client`, script `udcs`) depends only on `udcs-shared[http]`.
+- The transfer primitives moved out of the agent into `udcs_shared.transfer` (stdlib) and `udcs_shared.transfer_http` (the optional `http` extra), so the client does not pull in agent dependencies (psutil, pywin32, NVML). The agent re-exports them, and its `_is_reparse` test seam is kept.
+- `udcs_shared.dpapi` gained a scope (`machine` for the node credential, unchanged; `user` for researcher sessions) and per-purpose entropy.
+
+**Controller additions** (all additive, all behind `SubmitJobs`):
+- `GET /packages?kind=environment|dataset`: approved items only; user packages are never listed.
+- `GET /deployment`.
+- `JobOut.package`.
+- A log cursor, `GET /jobs/{id}/logs?after=`. Before it, a client could never see past the first 200 lines.
+- `OutputManifest` now also refuses file/directory clashes.
+
+**Security properties, each tested:**
+
+| Area | Property |
+|---|---|
+| File selection | An include allowlist, plus a hard deny list: VCS, caches, venvs, results, and about 40 credential file shapes. Naming a denied file is an error. Links and junctions are refused. A secret heuristic, labelled as one |
+| Credentials | DPAPI user scope (Windows) or 0600 (POSIX). The token is bound to its origin, which is normalised. `UDCS_TOKEN` must be bound to `UDCS_SERVER`. No redirects. https only. `logout` revokes at the issuing origin and says when it could not |
+| Fetch | Model-validated paths. Directories are created one segment at a time with link checks, plus a resolved-path check. Downloads are hash-verified, more bytes than declared are refused, and nothing is ever overwritten. Reserved names are refused. `--resume` is bound to the job, attempt and output set. A client-side byte limit and a free-space check apply |
+| Output | All server text is sanitised: escapes and control characters are stripped, then secrets are redacted, then the text is cut |
+
+**Review.** A five-lens adversarial review confirmed 27 findings, with each one independently verified; none were rejected:
+
+| Severity | Count | Examples |
+|---|---|---|
+| Medium | 11 | logout not revoking the stored token; outputs colliding with the client's reserved names; `--resume` mixing fetches; config values lost on rewrite; gaps in the deny list; `dataset push` uploading before policy checks; `watch` dropping the final log lines |
+| Low | 16 | `UDCS_TOKEN` not origin-bound; `:443` origin mismatch; redaction order; CA bundle errors; job ids used as paths |
+
+All 27 are fixed with regression tests (`client/tests/test_client_review_regressions.py`). A mutation pass removed 15 security guards one at a time: 14 are caught, and the file-symlink guard's test is skipped on machines that cannot create symlinks.
+
+**Bugs found while building it:**
+- A zero-byte blob could never be downloaded, which also affected the agent's `fetch_blob`.
+- The e2e controller fixture wrote blobs into the repository's `var/`.
+
+**Open decisions and limits:**
+- **Package jobs still carry the catalog contract.** `total_units` must be set (the client sends 1), and a completion needs a catalog checksum. Defining a user-code result contract belongs to the execution milestone.
+- **The package-job end-to-end path is untested.** Nothing executes yet. A skipped test, `test_package_job_end_to_end`, keeps it visible.
+- **Many small files remain slow** (about 13 files/s); the client warns above 1,000 files.
+- **The secret heuristic is not exhaustive.** The allowlist is the control.
+

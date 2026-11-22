@@ -342,6 +342,10 @@ class OutputManifest(_Contract):
         folded = [p.casefold() for p in paths]
         if paths != sorted(paths) or len(set(folded)) != len(folded):
             raise ValueError("output files must be sorted and unique")
+        as_dirs = {"/".join(f.split("/")[:i]) for f in folded for i in range(1, f.count("/") + 1)}
+        clash = as_dirs & set(folded)
+        if clash:  # "a" and "a/b" cannot both be written to disk
+            raise ValueError(f"an output path is both a file and a directory: {sorted(clash)[0]!r}")
         return self
 
     @property

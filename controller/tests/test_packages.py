@@ -767,3 +767,109 @@ def test_kill_switch_stops_dispatch_and_node_endpoints(
         f"{API}/agent/blobs/{sha(main)}", headers=node, params={"job": job["id"], "attempt": 1}
     )
     assert blob.status_code == 404
+
+
+# -- researcher-client support (listing, deployment, package on jobs, log cursor) -------------
+
+
+def _approve_env(client, admin_headers, name, version):
+    payload = f"{name}{version}".encode()
+    _upload(client, admin_headers, payload)
+    body = {
+        "schema_version": 1,
+        "kind": "environment",
+        "name": name,
+        "version": version,
+        "python": "3.12",
+        "platform": "win_amd64",
+        "lock": [{"name": "numpy", "version": "2.1.3"}],
+        "files": [{"path": "x.txt", "sha256": sha(payload), "size": len(payload)}],
+    }
+    digest = client.post(f"{API}/packages", headers=admin_headers, json=body).json()["digest"]
+    return digest
+
+
+def test_listing_shows_only_approved_environments_and_datasets(
+    client, student_headers, admin_headers, uploaded_package
+):
+    approved = _approve_env(client, admin_headers, "sci", "1")
+    pending = _approve_env(client, admin_headers, "sci", "2")
+    ok = client.post(f"{API}/admin/packages/{approved}/approve", headers=admin_headers)
+    assert ok.status_code == 200
+    listed = client.get(f"{API}/packages", headers=student_headers, params={"kind": "environment"})
+    assert listed.status_code == 200
+    body = listed.json()
+    assert [i["digest"] for i in body["items"]] == [approved] and body["total"] == 1
+    assert pending not in listed.text
+    assert body["items"][0]["python"] == "3.12" and body["items"][0]["platform"] == "win_amd64"
+    assert "lock" not in body["items"][0]  # summaries only
+    user_pkgs = client.get(f"{API}/packages", headers=student_headers, params={"kind": "package"})
+    assert user_pkgs.status_code == 422  # private packages are never listed
+    page = client.get(
+        f"{API}/packages",
+        headers=student_headers,
+        params={"kind": "environment", "limit": 1, "offset": 1},
+    )
+    assert page.json()["items"] == []
+    assert client.get(f"{API}/packages/policy", headers=student_headers).status_code == 200
+
+
+def test_deployment_reports_whether_user_code_is_enabled(app, client, student_headers):
+    assert client.get(f"{API}/deployment", headers=student_headers).json() == {
+        "user_code_enabled": False
+    }
+    app.state.settings = app.state.settings.model_copy(update={"user_code_enabled": True})
+    assert client.get(f"{API}/deployment", headers=student_headers).json()["user_code_enabled"]
+    assert client.get(f"{API}/deployment").status_code == 401
+
+
+def test_jobs_show_their_package(app, client, student_headers, uploaded_package):
+    digest, _ = uploaded_package
+    job = _package_job(app, client, student_headers, digest)
+    assert job["package"] == digest
+    catalog = client.post(
+        f"{API}/jobs", headers=student_headers, json={"kind": "cpu", "total_units": 5}
+    ).json()
+    assert catalog["package"] is None
+
+
+def test_log_cursor_pages_past_the_first_rows(app, client, student_headers):
+    from udcs_controller.jobs.models import JobLog
+
+    job = client.post(
+        f"{API}/jobs", headers=student_headers, json={"kind": "cpu", "total_units": 5}
+    ).json()
+    with app.state.sessionmaker() as db:
+        for i in range(250):
+            db.add(
+                JobLog(
+                    job_id=uuid.UUID(job["id"]),
+                    at=app.state.clock(),
+                    attempt=1,
+                    source="agent",
+                    message=f"line {i}",
+                )
+            )
+        db.commit()
+    url = f"{API}/jobs/{job['id']}/logs"
+    first = client.get(url, headers=student_headers).json()
+    assert len(first) == 200
+    rest = client.get(url, headers=student_headers, params={"after": first[-1]["id"]}).json()
+    assert rest and all(r["id"] > first[-1]["id"] for r in rest)
+    assert rest[-1]["message"] == "line 249"
+    assert client.get(url, headers=student_headers, params={"after": rest[-1]["id"]}).json() == []
+
+
+def test_output_manifest_rejects_a_file_directory_clash():
+    from udcs_shared.packages import OutputManifest
+
+    with pytest.raises(ValidationError, match="both a file and a directory"):
+        OutputManifest.model_validate(
+            {
+                "attempt": 1,
+                "files": [
+                    {"path": "a", "sha256": sha(b"1"), "size": 1},
+                    {"path": "a/b", "sha256": sha(b"2"), "size": 1},
+                ],
+            }
+        )

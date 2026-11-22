@@ -50,6 +50,7 @@ def controller_factory(tmp_path):
 
 @contextlib.contextmanager
 def _running_controller(tmp_path, *, tokens: int = 2, **overrides):
+    overrides.setdefault("blob_dir", str(tmp_path / "blobs"))  # never the repository's var/
     ca = trustme.CA()
     server_cert = ca.issue_cert("127.0.0.1", "localhost")
     cert_file, key_file, ca_file = (tmp_path / n for n in ("server.pem", "server.key", "ca.pem"))

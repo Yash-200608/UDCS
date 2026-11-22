@@ -46,9 +46,11 @@ class JobOut(BaseModel):
     memory_bytes: int
     error: str | None
     node_id: uuid.UUID | None = Field(default=None, description="shown only to manage_jobs")
+    package: str | None = Field(default=None, description="user-code package digest, if any")
 
 
 class JobLogOut(BaseModel):
+    id: int = Field(description="increasing; pass the last one as ?after= to page or follow")
     at: datetime
     attempt: int
     source: str

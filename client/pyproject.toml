@@ -1,0 +1,16 @@
+[project]
+name = "udcs-client"
+version = "0.1.0"
+description = "UDCS researcher client: package a Python project, submit it, monitor it, fetch verified results"
+requires-python = ">=3.11"
+dependencies = ["udcs-shared[http]"]
+
+[project.scripts]
+udcs = "udcs_client.cli:main"
+
+[tool.uv.sources]
+udcs-shared = { workspace = true }
+
+[build-system]
+requires = ["uv_build>=0.8,<0.12"]
+build-backend = "uv_build"

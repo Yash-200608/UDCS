@@ -103,6 +103,9 @@ jobs:
           UDCS_RACE_ROUNDS: "50"  # independent sessions, released together by a barrier
         run: uv run pytest controller/tests/test_jobs_concurrency.py -q -rs
 
+      - name: Researcher client on Linux (POSIX session permissions, symlink refusal)
+        run: uv run pytest client/tests -q -rs
+
   test-windows:
     # Primary lab-machine platform: DPAPI, Job Objects, PDH, the governor and
     # the workload manager. Runs the whole suite on SQLite.

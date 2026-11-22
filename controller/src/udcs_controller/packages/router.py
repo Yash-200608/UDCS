@@ -8,6 +8,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response, status
 from fastapi.responses import StreamingResponse
+from sqlalchemy import func, select
 
 from udcs_controller.audit.models import ActorType
 from udcs_controller.audit.service import record_event
@@ -25,6 +26,7 @@ from udcs_shared.packages import (
     CHUNK_SHA256_HEADER,
     SHA256,
     OutputManifest,
+    PackageKind,
     PackagePolicy,
     UploadStart,
     UploadStatus,
@@ -222,6 +224,53 @@ def download(
 @router.get("/packages/policy", response_model=PackagePolicy)
 def get_policy(auth: SubmitJobs, request: Request) -> PackagePolicy:
     return _policy(request)
+
+
+@router.get("/deployment")
+def deployment(auth: SubmitJobs, request: Request) -> dict:
+    """What this deployment allows, so clients can explain a refusal before uploading.
+    It reveals nothing a refused submission would not."""
+    return {"user_code_enabled": bool(request.app.state.settings.user_code_enabled)}
+
+
+@router.get("/packages")
+def list_packages(
+    auth: SubmitJobs,
+    db: DbSession,
+    kind: Annotated[PackageKind, Query()],
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+):
+    """Approved environments or datasets, newest approval first. User packages are
+    private and never listed. (When per-group dataset access lands, filter here.)"""
+    if kind == PackageKind.PACKAGE:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY, detail="only environments and datasets are listed"
+        )
+    approved = (Package.kind == kind) & Package.approved_at.is_not(None)
+    total = db.scalar(select(func.count()).select_from(Package).where(approved)) or 0
+    rows = db.scalars(
+        select(Package)
+        .where(approved)
+        .order_by(Package.approved_at.desc(), Package.digest.asc())
+        .limit(limit)
+        .offset(offset)
+    )
+    items = [
+        {
+            "digest": p.digest,
+            "kind": p.kind.value,
+            "name": p.name,
+            "version": p.version,
+            "python": p.manifest.get("python"),
+            "platform": p.manifest.get("platform"),
+            "total_bytes": p.total_bytes,
+            "files": len(p.manifest.get("files", [])),
+            "approved_at": p.approved_at.isoformat(),
+        }
+        for p in rows
+    ]
+    return {"items": items, "total": total, "limit": limit, "offset": offset}
 
 
 @router.post("/packages", status_code=status.HTTP_201_CREATED)

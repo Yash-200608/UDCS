@@ -8,7 +8,8 @@ import sys
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urlsplit
+
+from udcs_shared.urls import url_problem
 
 CONFIG_FILENAME = "agent.toml"
 CREDENTIAL_FILENAME = "node-credential.bin"
@@ -25,18 +26,9 @@ class ConfigError(Exception):
 
 
 def validate_controller_url(url: str, *, allow_insecure_http: bool) -> str:
-    parts = urlsplit(url)
-    if parts.scheme not in ("https", "http"):
-        raise ConfigError(f"controller URL must be https:// (got {url!r})")
-    if parts.scheme == "http" and not allow_insecure_http:
-        raise ConfigError(
-            "refusing plaintext http:// controller URL; use https:// "
-            "(or allow_insecure_http for local development only)"
-        )
-    if not parts.hostname:
-        raise ConfigError("controller URL has no host")
-    if parts.username or parts.password or parts.query or parts.fragment:
-        raise ConfigError("controller URL must not contain credentials, query or fragment")
+    problem = url_problem(url, allow_insecure_http=allow_insecure_http)
+    if problem:
+        raise ConfigError(problem)
     return url.rstrip("/")
 
 

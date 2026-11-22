@@ -3,18 +3,19 @@ name = "udcs-workspace"
 version = "0.1.0"
 description = "UDCS — University Distributed Compute System (workspace root)"
 requires-python = ">=3.11"
-dependencies = ["udcs-shared", "udcs-controller", "udcs-agent"]
+dependencies = ["udcs-shared", "udcs-controller", "udcs-agent", "udcs-client"]
 
 [tool.uv]
 package = false
 
 [tool.uv.workspace]
-members = ["shared", "controller", "node_agent"]
+members = ["shared", "controller", "node_agent", "client"]
 
 [tool.uv.sources]
 udcs-shared = { workspace = true }
 udcs-controller = { workspace = true }
 udcs-agent = { workspace = true }
+udcs-client = { workspace = true }
 
 [dependency-groups]
 dev = [
@@ -24,7 +25,7 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["shared/tests", "controller/tests", "node_agent/tests", "tests"]
+testpaths = ["shared/tests", "controller/tests", "node_agent/tests", "client/tests", "tests"]
 addopts = "-ra --strict-markers --import-mode=importlib"
 markers = [
     "hardware: reads the real hardware of the machine running the tests",
@@ -45,4 +46,4 @@ ignore = ["S101"]
 "tools/**" = ["S603"]  # fixed argv, no shell
 
 [tool.ruff.lint.isort]
-known-first-party = ["udcs_shared", "udcs_controller", "udcs_agent"]
+known-first-party = ["udcs_shared", "udcs_controller", "udcs_agent", "udcs_client"]

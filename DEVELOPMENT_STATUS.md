@@ -11,6 +11,7 @@ _Last updated: 2026-11-22. Development checkpoint on branch `feature/udcs-backgr
 | M2a: Distributed execution pipeline (catalog workloads only) | **Implemented and tested** on one PC with two agent instances: controller → scheduler → agent → Job Object workload → telemetry → verified result, plus recovery. See [execution-pipeline.md](docs/architecture/execution-pipeline.md) |
 | M2b: Isolation for workloads (D-3) | **Decided: [ADR 0001](docs/decisions/0001-workload-isolation.md). Native AppContainer backend implemented and tested; the catalog runs inside it where a node verifies it.** **Service-path gate passed** (2026-11-22, SYSTEM in session 0). User code is still **disabled**: ADR gate 2 (review of what ALL APPLICATION PACKAGES exposes on a lab image) is open |
 | ADR 0001 gate 3: user-code packaging and delivery | **Implemented, tested and security-reviewed** ([ADR 0002](docs/decisions/0002-user-code-packaging.md)). Manifest, validator, CAS, resumable chunked transfer, node staging and outputs work end to end **without executing anything**. All 11 review findings are fixed and regression-tested. Execution is still disabled by two switches |
+| Researcher submission client (`udcs`) | **Implemented and tested; execution still disabled.** Create or select a project, declare its entry point and dependencies (approved environments only), attach datasets, validate, upload, submit, monitor and fetch verified results. The disabled path is honest: it registers the package, creates no job and exits 3. Review: 27 findings fixed. [Guide](docs/guides/researcher-client.md) |
 
 ## Status legend
 
@@ -178,6 +179,19 @@ Decision: [ADR 0002](docs/decisions/0002-user-code-packaging.md). **Nothing exec
 
 **Not done:** unreferenced-blob GC and a periodic sweep; per-node admin eligibility for user code; node Python-version matching in the scheduler; per-group dataset access; a batch upload endpoint; a standalone client; attestation against a dishonest node (T26).
 
+### Researcher client (`udcs`, 2026-11-23)
+
+Design and review: [ADR 0002, "Researcher client"](docs/decisions/0002-user-code-packaging.md). Guide: [docs/guides/researcher-client.md](docs/guides/researcher-client.md).
+
+| Component | State | Evidence |
+|---|---|---|
+| `udcs` CLI: login/logout/whoami, init, check, push, submit, env list/show/use, dataset list/add/push, jobs/status/watch/logs/cancel, fetch | tested in-process against the real controller | `client/tests/` (83) |
+| Over real TLS: certificate verification, stored session (DPAPI user scope), disabled submit, catalog job | tested | `tests/e2e/test_researcher_client_tls.py` |
+| Hostile project directory (secrets, venvs, links, junctions, unsafe names) and hostile controller (traversal, clashes, wrong bytes, redirects, escape sequences) | tested | `test_client_hostile_*.py` |
+| Controller additions: approved-package listing, `/deployment`, `JobOut.package`, log cursor | tested | `controller/tests/test_packages.py` |
+| Transfer, DPAPI and URL code moved from the agent to `udcs_shared` | tested; agent suite unchanged | `shared/tests/test_dpapi.py` |
+| Package job end to end (real agent executes, outputs fetched) | **not possible yet**: execution disabled | skipped `test_package_job_end_to_end` |
+
 ### M2a engineering review
 
 **Achieved and verified:**
@@ -303,3 +317,10 @@ Not covered by this run:
   - Implemented manifest, validator, CAS, resumable chunked transfer, node staging and outputs, with no execution.
   - The adversarial review found 11 issues. The high-severity one: an output manifest could grant the job owner any blob in the store. All are fixed, with regression tests and 13 of 13 fix mutations caught.
   - Full suite on Windows: 289 passed, 15 skipped (these need PostgreSQL).
+- **2026-11-23, researcher client (`udcs`).**
+  - Researchers can prepare, validate, upload and register packages, and attach approved environments and datasets.
+  - Package submission is refused honestly while execution is disabled.
+  - Catalog jobs can be submitted, watched and verified locally.
+  - The adversarial review confirmed 27 findings; all are fixed with regression tests, and 14 of 15 guard mutations are caught.
+  - Two latent bugs were fixed: zero-byte blob downloads, and e2e tests writing into `var/`.
+
