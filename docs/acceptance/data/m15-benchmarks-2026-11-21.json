@@ -1,0 +1,99 @@
+{
+ "machine": {
+  "cpu": "Intel64 Family 6 Model 94 Stepping 3, GenuineIntel",
+  "logical_cpus": 4,
+  "ram_gib": 23.9,
+  "os": "Windows-11-10.0.22000-SP0"
+ },
+ "policy": "ProtectionPolicy() defaults",
+ "started": 1795277469.8778088,
+ "overhead": {
+  "ticks": 30,
+  "interval_s": 1.0,
+  "process_cpu_percent_of_one_core": 0.728,
+  "tick_cpu_ms_ema": 8.92,
+  "rss_mib": 121.9
+ },
+ "interference": {
+  "cpu": {
+   "error": "TimeoutError: level shared not reached (at constrained)"
+  },
+  "cpu_all": {
+   "baseline": {
+    "n": 31,
+    "median_ms": 360.081,
+    "p95_ms": 679.404,
+    "max_ms": 788.816,
+    "slowdown_median_pct": 0.0,
+    "slowdown_p95_pct": 88.7
+   },
+   "unmanaged": {
+    "n": 15,
+    "median_ms": 853.489,
+    "p95_ms": 1596.78,
+    "max_ms": 1596.78,
+    "slowdown_median_pct": 137.0,
+    "slowdown_p95_pct": 343.5
+   },
+   "managed": {
+    "n": 27,
+    "median_ms": 480.534,
+    "p95_ms": 616.569,
+    "max_ms": 695.087,
+    "slowdown_median_pct": 33.5,
+    "slowdown_p95_pct": 71.2
+   },
+   "baseline_after": {
+    "n": 30,
+    "median_ms": 397.265,
+    "p95_ms": 593.282,
+    "max_ms": 779.524,
+    "slowdown_median_pct": 10.3,
+    "slowdown_p95_pct": 64.8
+   },
+   "managed_workload_states": {
+    "cpu0": "throttled",
+    "cpu1": "throttled",
+    "cpu2": "throttled",
+    "cpu3": "throttled"
+   }
+  },
+  "memory": {
+   "error": "TimeoutError: level shared not reached (at constrained)"
+  },
+  "disk": {
+   "error": "TimeoutError: level shared not reached (at constrained)"
+  },
+  "gpu": {
+   "error": "TimeoutError: level shared not reached (at constrained)"
+  }
+ },
+ "response": [
+  {
+   "kind": "cpu",
+   "trigger": "student_arrives",
+   "error": "TimeoutError: level open not reached (at constrained)"
+  },
+  {
+   "kind": "memory",
+   "trigger": "student_arrives",
+   "error": "TimeoutError: level open not reached (at constrained)"
+  },
+  {
+   "kind": "disk",
+   "trigger": "student_arrives",
+   "error": "TimeoutError: level open not reached (at constrained)"
+  },
+  {
+   "kind": "gpu",
+   "trigger": "student_arrives",
+   "error": "TimeoutError: level open not reached (at constrained)"
+  },
+  {
+   "kind": "cpu",
+   "trigger": "pressure_while_locked",
+   "error": "TimeoutError: level away not reached (at constrained)"
+  }
+ ],
+ "finished": 1795278561.442088
+}

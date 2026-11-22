@@ -1,0 +1,51 @@
+{
+ "machine": {
+  "cpu": "Intel64 Family 6 Model 94 Stepping 3, GenuineIntel",
+  "logical_cpus": 4,
+  "ram_gib": 23.9,
+  "os": "Windows-11-10.0.22000-SP0"
+ },
+ "policy": "ProtectionPolicy() defaults",
+ "started": 1795296400.5396113,
+ "interference": {
+  "disk": {
+   "baseline": {
+    "n": 357,
+    "median_ms": 66.713,
+    "p95_ms": 159.259,
+    "max_ms": 900.933,
+    "slowdown_median_pct": 0.0,
+    "slowdown_p95_pct": 138.7
+   },
+   "unmanaged": {
+    "n": 142,
+    "median_ms": 99.341,
+    "p95_ms": 1409.288,
+    "max_ms": 1706.88,
+    "slowdown_median_pct": 48.9,
+    "slowdown_p95_pct": 2012.4
+   },
+   "managed": {
+    "n": 162,
+    "median_ms": 71.862,
+    "p95_ms": 716.734,
+    "max_ms": 1364.547,
+    "slowdown_median_pct": 7.7,
+    "slowdown_p95_pct": 974.3
+   },
+   "baseline_after": {
+    "n": 305,
+    "median_ms": 66.69,
+    "p95_ms": 350.723,
+    "max_ms": 891.848,
+    "slowdown_median_pct": -0.0,
+    "slowdown_p95_pct": 425.7
+   },
+   "managed_workload_states": {
+    "disk0": "waiting"
+   }
+  }
+ },
+ "response": [],
+ "finished": 1795296582.1088939
+}

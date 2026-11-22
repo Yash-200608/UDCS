@@ -1,0 +1,31 @@
+{
+ "baseline_ms": 342.8,
+ "conditions": {
+  "baseline": {
+   "median_pct": 0.0,
+   "min_pct": -3.4,
+   "max_pct": 22.5
+  },
+  "idle_nocap": {
+   "median_pct": 1.1,
+   "min_pct": -0.2,
+   "max_pct": 16.7
+  },
+  "idle_cap50": {
+   "median_pct": -2.1,
+   "min_pct": -3.1,
+   "max_pct": 0.3
+  },
+  "idle_cap5": {
+   "median_pct": 1.1,
+   "min_pct": -2.0,
+   "max_pct": 9.5
+  },
+  "suspended": {
+   "median_pct": -1.1,
+   "min_pct": -2.7,
+   "max_pct": 0.9
+  }
+ },
+ "rounds": 5
+}

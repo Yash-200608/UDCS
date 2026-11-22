@@ -1,0 +1,256 @@
+{
+ "machine": {
+  "cpu": "Intel64 Family 6 Model 94 Stepping 3, GenuineIntel",
+  "logical_cpus": 4,
+  "ram_gib": 23.9,
+  "os": "Windows-11-10.0.22000-SP0"
+ },
+ "policy": "ProtectionPolicy() defaults",
+ "started": 1795294051.809851,
+ "overhead": {
+  "ticks": 30,
+  "interval_s": 1.0,
+  "process_cpu_percent_of_one_core": 0.208,
+  "tick_cpu_ms_ema": 1.97,
+  "rss_mib": 123.6
+ },
+ "interference": {
+  "cpu": {
+   "baseline": {
+    "n": 83,
+    "median_ms": 29.394,
+    "p95_ms": 30.451,
+    "max_ms": 30.624,
+    "slowdown_median_pct": 0.0,
+    "slowdown_p95_pct": 3.6
+   },
+   "unmanaged": {
+    "n": 60,
+    "median_ms": 34.668,
+    "p95_ms": 49.826,
+    "max_ms": 51.171,
+    "slowdown_median_pct": 17.9,
+    "slowdown_p95_pct": 69.5
+   },
+   "managed": {
+    "n": 81,
+    "median_ms": 29.782,
+    "p95_ms": 31.364,
+    "max_ms": 32.631,
+    "slowdown_median_pct": 1.3,
+    "slowdown_p95_pct": 6.7
+   },
+   "baseline_after": {
+    "n": 83,
+    "median_ms": 29.352,
+    "p95_ms": 30.356,
+    "max_ms": 30.809,
+    "slowdown_median_pct": -0.1,
+    "slowdown_p95_pct": 3.3
+   },
+   "managed_workload_states": {
+    "cpu0": "paused",
+    "cpu1": "paused",
+    "cpu2": "paused",
+    "cpu3": "paused"
+   }
+  },
+  "cpu_all": {
+   "baseline": {
+    "n": 36,
+    "median_ms": 330.19,
+    "p95_ms": 384.25,
+    "max_ms": 387.155,
+    "slowdown_median_pct": 0.0,
+    "slowdown_p95_pct": 16.4
+   },
+   "unmanaged": {
+    "n": 15,
+    "median_ms": 825.417,
+    "p95_ms": 1061.649,
+    "max_ms": 1061.649,
+    "slowdown_median_pct": 150.0,
+    "slowdown_p95_pct": 221.5
+   },
+   "managed": {
+    "n": 38,
+    "median_ms": 330.378,
+    "p95_ms": 361.031,
+    "max_ms": 369.489,
+    "slowdown_median_pct": 0.1,
+    "slowdown_p95_pct": 9.3
+   },
+   "baseline_after": {
+    "n": 37,
+    "median_ms": 328.895,
+    "p95_ms": 384.92,
+    "max_ms": 391.681,
+    "slowdown_median_pct": -0.4,
+    "slowdown_p95_pct": 16.6
+   },
+   "managed_workload_states": {
+    "cpu0": "throttled",
+    "cpu1": "throttled",
+    "cpu2": "throttled",
+    "cpu3": "throttled"
+   }
+  },
+  "memory": {
+   "baseline": {
+    "n": 125,
+    "median_ms": 18.829,
+    "p95_ms": 21.372,
+    "max_ms": 28.022,
+    "slowdown_median_pct": 0.0,
+    "slowdown_p95_pct": 13.5
+   },
+   "unmanaged": {
+    "n": 47,
+    "median_ms": 53.418,
+    "p95_ms": 56.78,
+    "max_ms": 57.24,
+    "slowdown_median_pct": 183.7,
+    "slowdown_p95_pct": 201.6
+   },
+   "managed": {
+    "n": 123,
+    "median_ms": 18.953,
+    "p95_ms": 22.094,
+    "max_ms": 26.667,
+    "slowdown_median_pct": 0.7,
+    "slowdown_p95_pct": 17.3
+   },
+   "baseline_after": {
+    "n": 127,
+    "median_ms": 18.841,
+    "p95_ms": 19.443,
+    "max_ms": 21.73,
+    "slowdown_median_pct": 0.1,
+    "slowdown_p95_pct": 3.3
+   },
+   "managed_workload_states": {
+    "memory0": "waiting",
+    "memory1": "waiting",
+    "memory2": "waiting"
+   }
+  },
+  "disk": {
+   "baseline": {
+    "n": 66,
+    "median_ms": 72.571,
+    "p95_ms": 702.752,
+    "max_ms": 855.652,
+    "slowdown_median_pct": 0.0,
+    "slowdown_p95_pct": 868.4
+   },
+   "unmanaged": {
+    "n": 109,
+    "median_ms": 98.217,
+    "p95_ms": 122.214,
+    "max_ms": 1161.126,
+    "slowdown_median_pct": 35.3,
+    "slowdown_p95_pct": 68.4
+   },
+   "managed": {
+    "n": 21,
+    "median_ms": 681.415,
+    "p95_ms": 849.175,
+    "max_ms": 911.803,
+    "slowdown_median_pct": 839.0,
+    "slowdown_p95_pct": 1070.1
+   },
+   "baseline_after": {
+    "n": 19,
+    "median_ms": 655.804,
+    "p95_ms": 854.76,
+    "max_ms": 854.76,
+    "slowdown_median_pct": 803.7,
+    "slowdown_p95_pct": 1077.8
+   },
+   "managed_workload_states": {
+    "disk0": "waiting"
+   }
+  },
+  "gpu": {
+   "baseline": {
+    "n": 480,
+    "median_ms": 4.98,
+    "p95_ms": 5.01,
+    "max_ms": 5.027,
+    "slowdown_median_pct": 0.0,
+    "slowdown_p95_pct": 0.6
+   },
+   "unmanaged": {
+    "n": 75,
+    "median_ms": 44.871,
+    "p95_ms": 44.937,
+    "max_ms": 44.963,
+    "slowdown_median_pct": 801.0,
+    "slowdown_p95_pct": 802.3
+   },
+   "managed": {
+    "n": 482,
+    "median_ms": 4.979,
+    "p95_ms": 5.006,
+    "max_ms": 5.031,
+    "slowdown_median_pct": -0.0,
+    "slowdown_p95_pct": 0.5
+   },
+   "baseline_after": {
+    "n": 481,
+    "median_ms": 4.979,
+    "p95_ms": 5.009,
+    "max_ms": 5.06,
+    "slowdown_median_pct": -0.0,
+    "slowdown_p95_pct": 0.6
+   },
+   "managed_workload_states": {
+    "gpu0": "waiting"
+   }
+  }
+ },
+ "response": [
+  {
+   "kind": "cpu",
+   "trigger": "student_arrives",
+   "error": "TimeoutError: level open not reached (at shared)"
+  },
+  {
+   "kind": "memory",
+   "trigger": "student_arrives",
+   "error": "TimeoutError: level open not reached (at shared)"
+  },
+  {
+   "kind": "disk",
+   "trigger": "student_arrives",
+   "error": "TimeoutError: level open not reached (at shared)"
+  },
+  {
+   "kind": "gpu",
+   "trigger": "student_arrives",
+   "error": "TimeoutError: level open not reached (at shared)"
+  },
+  {
+   "kind": "cpu",
+   "trigger": "pressure_while_locked",
+   "trials": [
+    {
+     "decision_s": 1.0469999999986612,
+     "effect_s": 1.0469999999986612
+    },
+    {
+     "decision_s": 1.1090000000040163,
+     "effect_s": 1.1090000000040163
+    },
+    {
+     "decision_s": 1.2189999999973224,
+     "effect_s": 1.2189999999973224
+    }
+   ],
+   "effect_mean_s": 1.125,
+   "effect_worst_s": 1.219,
+   "missed": 0
+  }
+ ],
+ "finished": 1795295325.936474
+}
