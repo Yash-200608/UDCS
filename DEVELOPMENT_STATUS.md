@@ -105,6 +105,16 @@ Bugs found and fixed while building it:
 
 **What resumes now:** a requeued job resumes from its last uploaded checkpoint on any node. At most one upload interval of work is repeated (15 s by default).
 
+**CI** [44994104218](https://github.com/Yash-200608/UDCS/actions/runs/44994104218):
+
+| Job | Result |
+|---|---|
+| PostgreSQL migrate | a clean database reaches head `0004`; the models match |
+| PostgreSQL tests | **90/90** |
+| Race step | **150/150** (50 rounds × 3) |
+| Windows | **203 passed, 16 skipped** (the race tests skip on SQLite; one GPU test needs a driver), including the checkpoint-migration e2e test |
+| Lint | clean |
+
 **Still open:**
 - checkpoints over 1 MiB (chunked uploads) and object storage for big state;
 - checkpoint history (only the latest version is kept);
