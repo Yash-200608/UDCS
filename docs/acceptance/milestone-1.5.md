@@ -14,11 +14,11 @@ _2026-11-22. Raw data: `docs/acceptance/data/`. These are engineering targets me
 
 They are scripted in `tools/acceptance/m15_service_acceptance.ps1`.
 
-Two more gates are open:
-- **PostgreSQL integration through CI:** the CI job has never run.
-- **Disk interference:** the benchmark result is inconclusive.
+Status of the other gates:
+- **PostgreSQL integration through CI:** passed on the feature branch. CI run 44985979000 migrated a clean PostgreSQL 16 database to head, and 57/57 controller and shared tests passed. Getting there exposed two real bugs, both now fixed: data loss in the 0002 downgrade on SQLite, and nondeterministic audit ordering.
+- **Disk interference:** still open; the benchmark result is inconclusive.
 
-**Milestone 1.5 is accepted only after the service script passes on a lab PC and both of these gates are closed.** The commit on `feature/udcs-background-agent-m15` is a development checkpoint, not an acceptance.
+**Milestone 1.5 is accepted only after the service script passes on a lab PC and the disk gate is closed.** The commit on `feature/udcs-background-agent-m15` is a development checkpoint, not an acceptance.
 
 ## Test configuration
 
