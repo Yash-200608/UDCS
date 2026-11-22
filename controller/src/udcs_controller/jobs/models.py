@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import BigInteger, Float, ForeignKey, Index, Integer, String, Uuid
+from sqlalchemy import BigInteger, Float, ForeignKey, Index, Integer, LargeBinary, String, Uuid
 from sqlalchemy.orm import Mapped, mapped_column
 
 from udcs_controller.database.base import Base, JSONType, UTCDateTime, str_enum
@@ -62,3 +62,29 @@ class JobLog(Base):
     attempt: Mapped[int] = mapped_column(Integer)
     source: Mapped[str] = mapped_column(String(16))  # "controller" | "agent"
     message: Mapped[str] = mapped_column(String(200))
+
+
+class JobCheckpoint(Base):
+    """The latest accepted checkpoint of a job, kept centrally so any node can resume it.
+
+    There is one row per job, replaced atomically under the job's row lock. A version is
+    accepted only from the node holding the current attempt, with a matching SHA-256 and
+    a valid payload, and with progress that never moves backwards.
+    """
+
+    __tablename__ = "job_checkpoints"
+
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("jobs.id", ondelete="CASCADE"), primary_key=True
+    )
+    version: Mapped[int] = mapped_column(Integer)  # controller-side, increases per upload
+    attempt: Mapped[int] = mapped_column(Integer)  # which attempt produced it
+    node_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("nodes.id", ondelete="SET NULL"), nullable=True
+    )
+    uploader_version: Mapped[int] = mapped_column(Integer)  # the agent's own counter
+    units_done: Mapped[int] = mapped_column(Integer)
+    sha256: Mapped[str] = mapped_column(String(64))
+    size: Mapped[int] = mapped_column(Integer)
+    payload: Mapped[bytes] = mapped_column(LargeBinary)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime())

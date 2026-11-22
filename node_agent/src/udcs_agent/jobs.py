@@ -17,6 +17,9 @@ checkpoint) or recreated.
 
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
 import json
 import logging
 import os
@@ -28,19 +31,24 @@ from typing import Any, Protocol
 
 from pydantic import ValidationError
 
+from udcs_agent.communication.client import ControllerUnavailable, ProtocolError
 from udcs_agent.governor.engine import AdmissionView
 from udcs_agent.workloads.manager import WorkloadManager, WorkloadSpec
 from udcs_shared.agent_api import PROTOCOL_VERSION
 from udcs_shared.jobs import (
     MAX_ASSIGNMENTS_PER_SYNC,
+    MAX_CHECKPOINT_BYTES,
     MAX_LOG_LINES_PER_REPORT,
     AgentJobReport,
+    CheckpointDownload,
+    CheckpointUpload,
     JobLogLine,
     JobResult,
     JobSyncRequest,
     JobSyncResponse,
     LocalJobState,
     NodeJobCapacity,
+    validate_catalog_checkpoint,
 )
 from udcs_shared.protection import ProtectionLevel, WorkloadClass
 
@@ -58,6 +66,8 @@ _PRESSURE = ("cpu_pressure", "memory_pressure", "paging", "signals_unavailable")
 
 class JobController(Protocol):
     def sync_jobs(self, request: JobSyncRequest) -> JobSyncResponse: ...
+    def put_checkpoint(self, job_id: uuid.UUID, upload: CheckpointUpload) -> None: ...
+    def get_checkpoint(self, job_id: uuid.UUID, attempt: int) -> CheckpointDownload: ...
 
 
 def workload_id(job_id: uuid.UUID) -> str:
@@ -73,10 +83,15 @@ class JobSync:
         admission: Callable[[], AdmissionView | None],
         has_gpu: bool,
         max_jobs: int = 2,
+        checkpoint_upload_seconds: float = 15.0,
         clock: Callable[[], float] = time.monotonic,
         wall_clock: Callable[[], float] = time.time,
     ) -> None:
         self.data_dir = data_dir
+        self._upload_every = checkpoint_upload_seconds
+        self._uploaded_units: dict[str, int] = {}  # per job, this process
+        self._last_upload: dict[str, float] = {}
+        self._notes: dict[str, list[str]] = {}  # extra log lines for the next report
         self._snapshot = snapshot
         self._admission = admission
         self._has_gpu = has_gpu
@@ -161,7 +176,11 @@ class JobSync:
             wid = workload_id(uuid.UUID(job_id))
             item = snapshot.get(wid)
             if item is None:
-                if self._wall() - float(entry.get("added_at", 0)) > READD_AFTER_SECONDS:
+                waiting_for_checkpoint = "resume" in entry
+                if (
+                    not waiting_for_checkpoint
+                    and self._wall() - float(entry.get("added_at", 0)) > READD_AFTER_SECONDS
+                ):
                     self._queue_add(job_id, entry)  # the add request was lost; idempotent
                 reports.append(
                     AgentJobReport(
@@ -169,6 +188,7 @@ class JobSync:
                         attempt=int(entry["attempt"]),
                         state=LocalJobState.WAITING,
                         units_done=0,
+                        logs=self._note_lines(job_id),
                     )
                 )
                 continue
@@ -212,16 +232,31 @@ class JobSync:
             result=result,
             error=error,
             logs=[
-                JobLogLine(age_seconds=min(86_400.0, max(0.0, now - t)), message=str(what)[:200])
-                for t, what in events
-            ],
+                *self._note_lines(job_id),
+                *(
+                    JobLogLine(
+                        age_seconds=min(86_400.0, max(0.0, now - t)), message=str(what)[:200]
+                    )
+                    for t, what in events
+                ),
+            ][-MAX_LOG_LINES_PER_REPORT:],
         )
+
+    def _note(self, job_id: str, message: str) -> None:
+        self._notes.setdefault(job_id, []).append(message[:200])
+        del self._notes[job_id][:-10]
+        logger.info("job %s: %s", job_id, message)
+
+    def _note_lines(self, job_id: str) -> list[JobLogLine]:
+        # Sent until a response is applied (like the event cursor), then cleared.
+        return [JobLogLine(age_seconds=0, message=m) for m in self._notes.get(job_id, [])]
 
     # -- response ------------------------------------------------------------------------------
 
     def apply(self, response: JobSyncResponse) -> None:
         self._log_cursor.update(self._pending_cursor)
         self._pending_cursor = {}
+        self._notes = {}  # delivered with the request this response answers
         # Removals first, so a job that was acknowledged and then reassigned in the same
         # response starts from a clean directory.
         for job_id in [*response.cancel, *response.acknowledged]:
@@ -229,6 +264,8 @@ class JobSync:
             if self._assignments.pop(key, None) is not None:
                 self._save()
             self._log_cursor.pop(key, None)
+            self._uploaded_units.pop(key, None)
+            self._last_upload.pop(key, None)
             WorkloadManager.queue_request(
                 self.data_dir, "remove", workload_id=workload_id(job_id), purge=True
             )
@@ -248,9 +285,13 @@ class JobSync:
                 "spec": assignment.spec.model_dump(mode="json"),
                 "added_at": self._wall(),
             }
+            if assignment.checkpoint is not None:
+                # Resume elsewhere-made progress: fetch and verify before the workload exists.
+                entry["resume"] = assignment.checkpoint.model_dump(mode="json")
             self._assignments[key] = entry
             self._save()  # persisted before the workload exists
-            self._queue_add(key, entry)
+            if "resume" not in entry:
+                self._queue_add(key, entry)
             logger.info("job %s accepted (%s)", key, assignment.spec.kind.value)
 
     def _queue_add(self, job_id: str, entry: dict[str, Any]) -> None:
@@ -270,4 +311,105 @@ class JobSync:
     def sync_once(self, controller: JobController) -> JobSyncResponse:
         response = controller.sync_jobs(self.build_request())
         self.apply(response)
+        self.resume_pending(controller)
+        self.upload_checkpoints(controller)
         return response
+
+    # -- central checkpoints -------------------------------------------------------------------
+
+    def _workdir(self, job_id: str) -> Path:
+        return self.data_dir / "workloads" / workload_id(uuid.UUID(job_id))
+
+    def resume_pending(self, controller: JobController) -> None:
+        """Fetch, verify and install central checkpoints for resumed assignments. A network
+        failure leaves the job waiting (retried next sync). A checkpoint that fails
+        verification is never used: the job then starts from zero, and its log says why."""
+        for job_id, entry in list(self._assignments.items()):
+            ref = entry.get("resume")
+            if ref is None:
+                continue
+            problem: str | None
+            try:
+                download = controller.get_checkpoint(uuid.UUID(job_id), int(entry["attempt"]))
+            except ControllerUnavailable:
+                continue  # try again next sync; the workload is not started yet
+            except ProtocolError as exc:
+                problem = f"central checkpoint unavailable ({exc})"
+                payload = b""
+            else:
+                payload, problem = self._verify_download(download, ref, entry)
+            workdir = self._workdir(job_id)
+            if problem is None:
+                workdir.mkdir(parents=True, exist_ok=True)
+                for stale in ("status.json", "result.json", "control.json"):
+                    (workdir / stale).unlink(missing_ok=True)
+                tmp = workdir / "checkpoint.tmp"
+                tmp.write_bytes(payload)
+                os.replace(tmp, workdir / "checkpoint.json")
+                self._uploaded_units[job_id] = int(ref["units_done"])
+                self._note(
+                    job_id,
+                    f"resumed from central checkpoint v{ref['version']} "
+                    f"at {ref['units_done']} units",
+                )
+            else:
+                (workdir / "checkpoint.json").unlink(missing_ok=True)
+                self._note(job_id, f"{problem}; starting from 0")
+            del entry["resume"]
+            self._save()
+            self._queue_add(job_id, entry)
+
+    @staticmethod
+    def _verify_download(
+        download: CheckpointDownload, ref: dict[str, Any], entry: dict[str, Any]
+    ) -> tuple[bytes, str | None]:
+        try:
+            payload = base64.b64decode(download.payload_b64, validate=True)
+        except (binascii.Error, ValueError):
+            return b"", "central checkpoint is not valid base64"
+        digest = hashlib.sha256(payload).hexdigest()
+        if digest != download.sha256 or digest != ref["sha256"]:
+            return b"", "central checkpoint failed its sha256 check"
+        if download.version != ref["version"] or download.units_done != ref["units_done"]:
+            return b"", "central checkpoint changed since assignment (stale reference)"
+        problem = validate_catalog_checkpoint(
+            payload,
+            units_done=int(ref["units_done"]),
+            total_units=int(entry["spec"]["total_units"]),
+        )
+        return payload, problem
+
+    def upload_checkpoints(self, controller: JobController) -> None:
+        """Send each running job's newest local checkpoint when its progress has advanced.
+        `version` is units_done, so it is monotonic per attempt and survives agent
+        restarts; a retried upload is idempotent on the controller."""
+        now = self._clock()
+        for job_id, entry in self._assignments.items():
+            if "resume" in entry:
+                continue
+            if now - self._last_upload.get(job_id, float("-inf")) < self._upload_every:
+                continue
+            try:
+                payload = (self._workdir(job_id) / "checkpoint.json").read_bytes()
+                units = int(json.loads(payload)["units_done"])
+            except (FileNotFoundError, ValueError, KeyError, TypeError, OSError):
+                continue  # nothing checkpointed yet (or mid-write; read again next time)
+            if units <= self._uploaded_units.get(job_id, 0) or len(payload) > MAX_CHECKPOINT_BYTES:
+                continue
+            upload = CheckpointUpload(
+                attempt=int(entry["attempt"]),
+                version=units,
+                units_done=units,
+                sha256=hashlib.sha256(payload).hexdigest(),
+                payload_b64=base64.b64encode(payload).decode("ascii"),
+            )
+            try:
+                controller.put_checkpoint(uuid.UUID(job_id), upload)
+            except ControllerUnavailable:
+                return  # the controller is gone; the heartbeat loop backs off
+            except ProtocolError as exc:
+                logger.warning("checkpoint upload for job %s rejected: %s", job_id, exc)
+                self._uploaded_units[job_id] = units  # do not resend the same state
+                continue
+            self._uploaded_units[job_id] = units
+            self._last_upload[job_id] = now

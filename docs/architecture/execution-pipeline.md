@@ -50,15 +50,46 @@ There is one reconciling round trip after each heartbeat, on the same thread, so
 
 | Rule | Mechanism | Test |
 |---|---|---|
-| A job runs on at most one node *as the current attempt* | atomic claim: `UPDATE … WHERE state = 'queued'`; `attempt` increments on every assignment | `test_two_nodes_never_receive_the_same_job…` (sequential only; see limits) |
+| A job runs on at most one node *as the current attempt* | candidates are locked `FOR UPDATE SKIP LOCKED` (concurrent syncs see disjoint rows and never wait), plus the claim `UPDATE … WHERE state = 'queued'` as a second guard; `attempt` increments on every assignment | **PostgreSQL race tests** (`test_jobs_concurrency.py`): independent sessions released together by a barrier; 50 rounds in CI. A mutation probe with both guards removed fails them |
+| Reports, reaping and cancel cannot overwrite each other | every read-modify-write locks the job row (`FOR UPDATE`); the reaper skips locked rows | PostgreSQL race test: a completion report racing the reaper ends in exactly one consistent state |
 | Stale work cannot overwrite current work | a report whose `(node, attempt)` does not match the job is ignored, and the node is told to cancel | `test_stale_attempt_reports_are_fenced…`, `test_same_node_old_attempt_is_fenced…` |
-| A lost node does not lose the job | a lease that is not renewed is requeued with a new attempt; after too many requeues the job fails | unit test plus e2e `test_lost_node_job_is_requeued_and_finished_elsewhere` |
+| A lost node loses neither the job nor its progress | a lease that is not renewed is requeued with a new attempt, keeping the central checkpoint's progress; after too many requeues the job fails | e2e `test_lost_node_job_resumes_on_another_node_from_the_central_checkpoint` (the original node's disk is deleted) |
 | A lost assignment (response never arrived) is recovered at once | a job assigned to a node that does not report it is requeued on that node's next sync | `test_stale_attempt_reports…` |
 | A controller restart does not mass-requeue | no lease is reaped during the first lease period after start, so nodes renew first | `test_controller_restart_does_not_requeue_before_nodes_can_renew` |
 | An agent restart resumes rather than restarts | `jobs/assignments.json` is written *before* the workload exists; the workload resumes from its checkpoint with the same attempt | e2e `test_agent_restart_resumes_the_same_attempt…` |
 | A lost or repeated unit is detected | `result.checksum` = Σ i² over the processed unit indices, checkpointed with `units_done`; the controller checks it in O(1) | `test_wrong_checksum_is_a_failure…`, e2e |
 | Failures are bounded | `job_max_failures` (3) for workload failures or bad results, and `job_max_requeues` (10) for lease losses | unit tests |
 | Finished or cancelled jobs leave nothing behind | an acknowledgement or cancel purges the workload directory; the manager waits for the process to exit and retries, because Windows will not delete a running process's working directory | `test_purge_removes_a_running_workloads_directory`, e2e cancel |
+
+## Checkpoint migration (implemented, tested)
+
+**Upload.** After each sync, the agent uploads a running job's local `checkpoint.json` whenever its progress has advanced. Uploads are rate-limited by `checkpoint_upload_seconds` (default 15 s).
+- **Atomic:** one request carries the bytes, their SHA-256 and `units_done`.
+- **Version:** the upload's version is `units_done`, so it is monotonic per attempt and stays valid across agent restarts.
+
+**Controller acceptance** (`PUT /agent/jobs/{id}/checkpoint`) requires all of the following, under the job's row lock:
+- the uploader holds the current attempt on its own node (fencing, exactly as for reports);
+- the payload decodes, is within 1 MiB, and matches the SHA-256;
+- the content is a consistent catalog checkpoint, whose checksum must equal the closed form for its `units_done`;
+- progress is not behind the stored checkpoint, and the version is newer for the same attempt.
+
+If any check fails, nothing is stored and the previous version stays. A truncated, interrupted or corrupted upload can therefore never replace a good checkpoint, and a retry of an accepted upload is idempotent.
+
+**Resume.**
+- **Requeue:** a requeue keeps the checkpoint's progress, and the next assignment carries a `CheckpointRef` (version, units, SHA-256, size).
+- **Before the workload starts:** the new node downloads the checkpoint (`GET …/checkpoint?attempt=N`, fenced) and verifies its hash against the reference, the version and units against the reference, and its semantics. It then installs the checkpoint into the workload directory and only then creates the workload, which resumes from it.
+- **Controller unreachable:** the job keeps waiting and the download is retried.
+- **Checkpoint unusable:** the job starts from zero, never from bad state, and its log says why.
+
+**What is still repeated:** only the units done after the last accepted upload, which is at most one upload interval of work.
+
+**When checkpoints are discarded:** a checkpoint is deleted when its job finishes, and it is not reused after a failed attempt, because that run's state may be the cause of the failure.
+
+**Limits:**
+- one checkpoint version per job (no history);
+- at most 1 MiB, in one request; larger state needs chunked, resumable uploads (future);
+- payloads are stored in PostgreSQL. That is fine for catalog checkpoints of a few hundred bytes, but not for gigabyte model state, which needs object storage;
+- semantic validation exists only for catalog checkpoints. User workloads (D-3) would need their own integrity model.
 
 ## Scheduling (proposed design, implemented)
 
@@ -73,14 +104,13 @@ Each candidate must fit the offer's kinds, remaining slots and memory. A GPU job
 This is deliberately simple. It does not yet do any of the following:
 - predictive availability ("this lab empties at 17:00");
 - preemption of low-priority work;
-- checkpoint migration between nodes (a requeued job restarts from zero);
 - quotas beyond the per-user unfinished-job limit.
 
 ## Known limits (honest)
 
 - **Delivery is at-least-once.** During a network partition a node can keep running a job that has already been reassigned, so the work is done twice. Only the current attempt's result is accepted.
 - **The checksum detects bugs, not cheating.** A malicious node can compute it without doing the work. Result attestation is open (T26, with T6).
-- **Concurrency of the claim is not tested.** It relies on the conditional UPDATE. No test runs two real concurrent transactions, and a mutation that removes the `state = 'queued'` guard is not caught by the suite.
+- **Race tests run only in CI.** No PostgreSQL is installed on the development PC, so they need CI to run. A local SQLite run skips them.
 - **A freshly started agent takes no work for at least 30 s.** This is by design: the governor starts at CONSTRAINED and offers work only after 30 s of continuous calm, and any noise restarts the timer. After a reboot a lab PC therefore joins the pool with a delay, and the agent logs each `job offer:` change. CI exposed this: an e2e wait of 60 s was too short on a noisy runner.
 - **Short jobs report coarsely.** Progress arrives once per heartbeat (default 15 s). A job shorter than that can go straight from `assigned` to `succeeded`.
 - **Job logs are lifecycle events only:** started, paused, evicted, completed and similar. Catalog workloads print nothing else, and stdout capture belongs with user code (D-3).

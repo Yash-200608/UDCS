@@ -28,6 +28,9 @@ Concurrency (PostgreSQL; SQLite serializes writers and ignores row locks):
 
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
 import logging
 import uuid
 from collections import Counter
@@ -38,14 +41,17 @@ from sqlalchemy.orm import Session
 
 from udcs_controller.auth.models import User
 from udcs_controller.config import Settings
-from udcs_controller.jobs.models import Job, JobLog
+from udcs_controller.jobs.models import Job, JobCheckpoint, JobLog
 from udcs_controller.nodes.models import Node
 from udcs_controller.nodes.service import check_protocol
 from udcs_shared.agent_api import NodeAdminState
 from udcs_shared.jobs import (
     MAX_ASSIGNMENTS_PER_SYNC,
+    MAX_CHECKPOINT_BYTES,
     TERMINAL_JOB_STATES,
     AgentJobReport,
+    CheckpointRef,
+    CheckpointUpload,
     JobAssignment,
     JobResult,
     JobSpec,
@@ -54,6 +60,7 @@ from udcs_shared.jobs import (
     JobSyncResponse,
     LocalJobState,
     expected_checksum,
+    validate_catalog_checkpoint,
 )
 from udcs_shared.protection import WorkloadClass
 
@@ -131,7 +138,7 @@ def cancel_job(db: Session, job: Job, *, now: datetime, reason: str) -> None:
         raise InvalidJobTransition(f"job is already {job.state.value}")
     # The node (if any) learns on its next sync: its report no longer matches a live
     # assignment, so it is told to cancel and discard the workload.
-    _finish(job, JobState.CANCELLED, now=now)
+    _finish(db, job, JobState.CANCELLED, now=now)
     add_log(db, job, f"cancelled: {reason}", at=now)
 
 
@@ -142,7 +149,17 @@ def spec_of(job: Job) -> JobSpec:
 # -- transitions ---------------------------------------------------------------------------
 
 
-def _finish(job: Job, state: JobState, *, now: datetime, error: str | None = None) -> None:
+def _drop_checkpoint(db: Session, job: Job) -> None:
+    checkpoint = db.get(JobCheckpoint, job.id)
+    if checkpoint is not None:
+        db.delete(checkpoint)
+        db.flush()  # later lookups in this transaction must not see it
+
+
+def _finish(
+    db: Session, job: Job, state: JobState, *, now: datetime, error: str | None = None
+) -> None:
+    _drop_checkpoint(db, job)  # a finished job never resumes; free the storage
     job.state = state
     job.finished_at = now
     job.updated_at = now
@@ -152,23 +169,25 @@ def _finish(job: Job, state: JobState, *, now: datetime, error: str | None = Non
 
 
 def _requeue(db: Session, job: Job, *, now: datetime, reason: str, settings: Settings) -> None:
-    """Back to the queue, keeping its original queue position. Progress was local to the
-    node that lost it, so it restarts from zero (checkpoints do not migrate yet)."""
+    """Back to the queue, keeping its original queue position. Progress is kept if a
+    checkpoint reached the controller; only work after the last upload is repeated."""
     job.requeues += 1
     if job.requeues > settings.job_max_requeues:
-        _finish(job, JobState.FAILED, now=now, error=f"requeued too often (last: {reason})")
+        _finish(db, job, JobState.FAILED, now=now, error=f"requeued too often (last: {reason})")
         add_log(db, job, f"failed: requeued too often ({reason})", at=now)
         return
     job.state = JobState.QUEUED
     job.node_id = None
     job.lease_expires_at = None
     job.assigned_at = None
-    job.units_done = 0
+    checkpoint = db.get(JobCheckpoint, job.id)
+    job.units_done = checkpoint.units_done if checkpoint is not None else 0
     job.local_state = None
     job.cpu_seconds = 0.0
     job.memory_bytes = 0
     job.updated_at = now
-    add_log(db, job, f"requeued: {reason}", at=now)
+    resume = f"; resumes from checkpoint at {checkpoint.units_done} units" if checkpoint else ""
+    add_log(db, job, f"requeued: {reason}{resume}", at=now)
 
 
 def _record_failure(
@@ -177,10 +196,11 @@ def _record_failure(
     job.failures += 1
     job.error = error[:300]
     if job.failures >= settings.job_max_failures:
-        _finish(job, JobState.FAILED, now=now)
+        _finish(db, job, JobState.FAILED, now=now)
         add_log(db, job, f"failed: {error}", at=now)
         return
     add_log(db, job, f"attempt {job.attempt} failed: {error}", at=now)
+    _drop_checkpoint(db, job)  # the failed run's state may be the cause: retry clean
     job.requeues -= 1  # a retry after a failure is counted as a failure, not a requeue
     _requeue(db, job, now=now, reason="retry after failure", settings=settings)
 
@@ -234,7 +254,8 @@ def _apply_report(
             at=now - timedelta(seconds=line.age_seconds),
             source="agent",
         )
-    job.units_done = min(report.units_done, job.total_units)
+    # Monotonic: a resumed attempt reports 0 until its workload has started.
+    job.units_done = max(job.units_done, min(report.units_done, job.total_units))
     # The process is gone by the time it reports completion (0 s): keep the highest
     # value seen for this attempt. Reset on requeue.
     job.cpu_seconds = max(job.cpu_seconds, report.cpu_seconds)
@@ -248,7 +269,7 @@ def _apply_report(
         if problem is None:
             job.result = report.result.model_dump(mode="json") if report.result else None
             job.units_done = job.total_units
-            _finish(job, JobState.SUCCEEDED, now=now)
+            _finish(db, job, JobState.SUCCEEDED, now=now)
             add_log(db, job, "succeeded: result verified", at=now)
         else:
             _record_failure(db, job, now=now, error=problem, settings=settings)
@@ -407,6 +428,106 @@ def _assign(
         db.refresh(job)
         memory_left -= need
         running_by_owner[job.owner_id] += 1
-        add_log(db, job, f"assigned (attempt {job.attempt})", at=now)
-        assigned.append(JobAssignment(job_id=job.id, attempt=job.attempt, spec=spec_of(job)))
+        ref = _checkpoint_ref(db, job)
+        resume = f", resume from {ref.units_done} units" if ref else ""
+        add_log(db, job, f"assigned (attempt {job.attempt}{resume})", at=now)
+        assigned.append(
+            JobAssignment(job_id=job.id, attempt=job.attempt, spec=spec_of(job), checkpoint=ref)
+        )
     return assigned
+
+
+# -- central checkpoints ---------------------------------------------------------------------
+
+
+class CheckpointRejected(Exception):
+    def __init__(self, status_code: int, detail: str) -> None:
+        super().__init__(detail)
+        self.status_code = status_code
+        self.detail = detail
+
+
+def _checkpoint_ref(db: Session, job: Job) -> CheckpointRef | None:
+    checkpoint = db.get(JobCheckpoint, job.id)
+    if checkpoint is None:
+        return None
+    return CheckpointRef(
+        version=checkpoint.version,
+        units_done=checkpoint.units_done,
+        sha256=checkpoint.sha256,
+        size=checkpoint.size,
+    )
+
+
+def _current_assignment(db: Session, node: Node, job_id: uuid.UUID, attempt: int) -> Job:
+    job = db.get(Job, job_id, with_for_update=True)  # serializes uploads and requeues
+    if (
+        job is None
+        or job.node_id != node.id
+        or job.attempt != attempt
+        or job.state not in ACTIVE_JOB_STATES
+    ):
+        # Fencing, as for reports: only the current attempt on its own node counts.
+        raise CheckpointRejected(409, "not the current assignment of this job")
+    return job
+
+
+def store_checkpoint(
+    db: Session, node: Node, job_id: uuid.UUID, upload: CheckpointUpload, *, now: datetime
+) -> JobCheckpoint:
+    """Validate, then atomically replace the job's checkpoint. Nothing is stored unless the
+    whole payload arrived intact and is consistent, so the previous version survives any
+    interrupted or corrupted upload."""
+    job = _current_assignment(db, node, job_id, upload.attempt)
+    try:
+        payload = base64.b64decode(upload.payload_b64, validate=True)
+    except (binascii.Error, ValueError):
+        raise CheckpointRejected(422, "payload is not valid base64") from None
+    if not payload or len(payload) > MAX_CHECKPOINT_BYTES:
+        raise CheckpointRejected(422, "payload size out of bounds")
+    if hashlib.sha256(payload).hexdigest() != upload.sha256:
+        raise CheckpointRejected(422, "sha256 mismatch: truncated or corrupted upload")
+    problem = validate_catalog_checkpoint(
+        payload, units_done=upload.units_done, total_units=job.total_units
+    )
+    if problem is not None:
+        raise CheckpointRejected(422, problem)
+
+    existing = db.get(JobCheckpoint, job.id)
+    if existing is not None:
+        if (
+            existing.attempt == upload.attempt
+            and existing.uploader_version == upload.version
+            and existing.sha256 == upload.sha256
+        ):
+            return existing  # a retried upload whose response was lost: idempotent
+        if upload.units_done < existing.units_done:
+            raise CheckpointRejected(409, "stale: older than the stored checkpoint")
+        if existing.attempt == upload.attempt and upload.version <= existing.uploader_version:
+            raise CheckpointRejected(409, "stale: version not newer than the stored one")
+        existing.version += 1
+        record = existing
+    else:
+        record = JobCheckpoint(job_id=job.id, version=1)
+        db.add(record)
+    record.attempt = upload.attempt
+    record.node_id = node.id
+    record.uploader_version = upload.version
+    record.units_done = upload.units_done
+    record.sha256 = upload.sha256
+    record.size = len(payload)
+    record.payload = payload
+    record.created_at = now
+    job.units_done = max(job.units_done, upload.units_done)
+    db.flush()
+    return record
+
+
+def checkpoint_for_assignee(
+    db: Session, node: Node, job_id: uuid.UUID, attempt: int
+) -> JobCheckpoint:
+    _current_assignment(db, node, job_id, attempt)
+    checkpoint = db.get(JobCheckpoint, job_id)
+    if checkpoint is None:
+        raise CheckpointRejected(404, "no checkpoint stored for this job")
+    return checkpoint

@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import json
+
 import pytest
 
 from udcs_shared.agent_api import PROTOCOL_VERSION
@@ -330,3 +334,135 @@ def test_per_user_active_job_limit(client, student_headers, app):
     for _ in range(2):
         assert client.post(f"{API}/jobs", headers=student_headers, json=body).status_code == 201
     assert client.post(f"{API}/jobs", headers=student_headers, json=body).status_code == 429
+
+
+# -- central checkpoints ----------------------------------------------------------------------
+
+
+def _checkpoint_body(attempt, units, version=1, checksum=None, corrupt=None):
+    payload = json.dumps(
+        {
+            "units_done": units,
+            "checksum": expected_checksum(units) if checksum is None else checksum,
+        }
+    ).encode()
+    digest = hashlib.sha256(payload).hexdigest()
+    if corrupt == "truncate":
+        payload = payload[:-3]  # interrupted upload: fewer bytes than were hashed
+    return {
+        "attempt": attempt,
+        "version": version,
+        "units_done": units,
+        "sha256": digest,
+        "payload_b64": base64.b64encode(payload).decode(),
+    }
+
+
+def _put_ckpt(client, headers, job_id, body):
+    return client.put(f"{API}/agent/jobs/{job_id}/checkpoint", headers=headers, json=body)
+
+
+def test_checkpoint_migrates_to_another_node_after_permanent_loss(
+    client, student_headers, node, submit, clock, enroll, inventory_factory
+):
+    job = submit(student_headers, units=100)
+    [first] = _sync(client, node)["assignments"]
+    assert first["checkpoint"] is None
+    _sync(client, node, [_report(first, "running", 40)], accept=False)
+    assert _put_ckpt(client, node, job["id"], _checkpoint_body(1, 40)).status_code == 204
+
+    # The original node disappears for good; its lease expires and the job is requeued.
+    clock.advance(seconds=2 * LEASE + 1)
+    other = enroll(inventory_factory(hostname="survivor"))[1]
+    _sync(client, other, accept=False)
+    requeued = _job(client, student_headers, job["id"])
+    assert requeued["state"] == "queued" and requeued["units_done"] == 40  # progress kept
+
+    [second] = _sync(client, other)["assignments"]
+    assert second["attempt"] == 2
+    ref = second["checkpoint"]
+    assert ref["units_done"] == 40 and ref["version"] == 1
+    download = client.get(
+        f"{API}/agent/jobs/{job['id']}/checkpoint?attempt=2", headers=other
+    ).json()
+    payload = base64.b64decode(download["payload_b64"])
+    assert hashlib.sha256(payload).hexdigest() == ref["sha256"] == download["sha256"]
+    assert json.loads(payload)["units_done"] == 40
+    # The lost node can neither download nor overwrite it any more (fencing).
+    assert (
+        client.get(f"{API}/agent/jobs/{job['id']}/checkpoint?attempt=1", headers=node).status_code
+        == 409
+    )
+    assert _put_ckpt(client, node, job["id"], _checkpoint_body(1, 60, 2)).status_code == 409
+    logs = [
+        line["message"]
+        for line in client.get(f"{API}/jobs/{job['id']}/logs", headers=student_headers).json()
+    ]
+    assert any("resumes from checkpoint at 40 units" in m for m in logs)
+    assert any(m.startswith("assigned (attempt 2, resume from 40 units)") for m in logs)
+
+    # The new node continues: newer progress is accepted, then the job completes.
+    assert _put_ckpt(client, other, job["id"], _checkpoint_body(2, 70)).status_code == 204
+    done = _sync(
+        client, other, [_report(second, "completed", 100, result=_result(100))], accept=False
+    )
+    assert done["acknowledged"] == [job["id"]]
+    assert _job(client, student_headers, job["id"])["state"] == "succeeded"
+    # A finished job's checkpoint is deleted.
+    assert (
+        client.get(f"{API}/agent/jobs/{job['id']}/checkpoint?attempt=2", headers=other).status_code
+        == 409
+    )
+
+
+def test_corrupted_interrupted_or_inconsistent_uploads_never_replace_a_good_checkpoint(
+    client, student_headers, node, submit
+):
+    job = submit(student_headers, units=100)
+    _sync(client, node)
+    assert _put_ckpt(client, node, job["id"], _checkpoint_body(1, 30)).status_code == 204
+    bad_hash = {**_checkpoint_body(1, 50, 2), "sha256": "0" * 64}
+    truncated = _checkpoint_body(1, 50, 2, corrupt="truncate")
+    wrong_sum = _checkpoint_body(1, 50, 2, checksum=12345)
+    lying_units = {**_checkpoint_body(1, 50, 2), "units_done": 60}
+    too_far = _checkpoint_body(1, 101, 2)
+    not_b64 = {**_checkpoint_body(1, 50, 2), "payload_b64": "!!!notbase64!!!"}
+    for body in (bad_hash, truncated, wrong_sum, lying_units, too_far, not_b64):
+        response = _put_ckpt(client, node, job["id"], body)
+        assert response.status_code == 422, (body, response.text)
+    stored = client.get(f"{API}/agent/jobs/{job['id']}/checkpoint?attempt=1", headers=node).json()
+    assert stored["units_done"] == 30 and stored["version"] == 1
+
+
+def test_stale_checkpoint_versions_are_rejected_and_retries_are_idempotent(
+    client, student_headers, node, submit
+):
+    job = submit(student_headers, units=100)
+    _sync(client, node)
+    body = _checkpoint_body(1, 30, version=5)
+    assert _put_ckpt(client, node, job["id"], body).status_code == 204
+    assert _put_ckpt(client, node, job["id"], body).status_code == 204  # retried: same
+    assert _put_ckpt(client, node, job["id"], _checkpoint_body(1, 35, 4)).status_code == 409
+    assert _put_ckpt(client, node, job["id"], _checkpoint_body(1, 20, 6)).status_code == 409
+    assert _put_ckpt(client, node, job["id"], _checkpoint_body(1, 40, 6)).status_code == 204
+    stored = client.get(f"{API}/agent/jobs/{job['id']}/checkpoint?attempt=1", headers=node).json()
+    assert stored["units_done"] == 40 and stored["version"] == 2
+
+
+def test_a_failed_attempt_discards_its_checkpoint(client, student_headers, node, submit):
+    job = submit(student_headers, units=10)
+    [a] = _sync(client, node)["assignments"]
+    assert _put_ckpt(client, node, job["id"], _checkpoint_body(1, 5)).status_code == 204
+    bad = {"units": 10, "checksum": "1"}
+    _sync(client, node, [_report(a, "completed", 10, result=bad)], accept=False)
+    [retry] = _sync(client, node)["assignments"]
+    assert retry["attempt"] == 2 and retry["checkpoint"] is None
+    assert _job(client, student_headers, job["id"])["units_done"] == 0
+
+
+def test_checkpoints_need_a_node_credential(client, student_headers, submit, node):
+    job = submit(student_headers)
+    _sync(client, node)
+    body = _checkpoint_body(1, 1)
+    assert _put_ckpt(client, student_headers, job["id"], body).status_code == 401
+    assert _put_ckpt(client, {}, job["id"], body).status_code == 401

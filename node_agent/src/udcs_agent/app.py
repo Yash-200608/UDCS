@@ -50,6 +50,7 @@ class AgentApp:
         require_secure_data_dir: bool = False,
         helper_channel: bool = True,
         max_jobs: int = 2,
+        checkpoint_upload_seconds: float = 15.0,
     ) -> None:
         self.data_dir = data_dir
         self.stop = stop or threading.Event()
@@ -63,6 +64,7 @@ class AgentApp:
         self._diagnostic: threading.Thread | None = None
         self._helper_channel = helper_channel
         self._max_jobs = max_jobs
+        self._checkpoint_upload_seconds = checkpoint_upload_seconds
         self.workloads: WorkloadManager | None = None
 
     # -- lifecycle -------------------------------------------------------------------------------
@@ -183,6 +185,7 @@ class AgentApp:
             admission=governor.admission_view,
             has_gpu=any(g.vendor == "nvidia" for g in inventory.gpus),
             max_jobs=self._max_jobs,
+            checkpoint_upload_seconds=self._checkpoint_upload_seconds,
         )
         client = self._client
 

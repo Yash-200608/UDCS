@@ -9,6 +9,7 @@ pressure low.
 
 from __future__ import annotations
 
+import shutil
 import sys
 import threading
 import time
@@ -65,7 +66,13 @@ class Node:
 
     def start(self) -> None:
         stop = threading.Event()
-        self.app = AgentApp(self.data_dir, stop=stop, helper_channel=False, max_jobs=1)
+        self.app = AgentApp(
+            self.data_dir,
+            stop=stop,
+            helper_channel=False,
+            max_jobs=1,
+            checkpoint_upload_seconds=0,  # upload on every sync where progress advanced
+        )
         self.thread = threading.Thread(target=self.app.run, name=f"node-{self.node_id[:8]}")
         self.thread.start()
 
@@ -189,18 +196,29 @@ def test_agent_restart_resumes_the_same_attempt_from_its_checkpoint(cluster):
     assert _messages(c, job_id).count("started") >= 2
 
 
-def test_lost_node_job_is_requeued_and_finished_elsewhere(cluster):
+def test_lost_node_job_resumes_on_another_node_from_the_central_checkpoint(cluster):
     c = cluster
     first, second = c.nodes
     first.start()
-    job_id = _submit(c, units=200)
-    assert _wait(lambda: _job(c, job_id)["units_done"] > 0, timeout=START_WAIT), _job(c, job_id)
+    job_id = _submit(c, units=400)  # ~20 s of work at full speed
+    assert _wait(lambda: _job(c, job_id)["units_done"] >= 100, timeout=START_WAIT), _job(c, job_id)
     assert _job(c, job_id, admin=True)["node_id"] == first.node_id
-    first.stop()  # the PC is switched off mid-job and never comes back
+    first.stop()
+    # The PC is gone for good: its disk too, so nothing local could help a resume.
+    shutil.rmtree(first.data_dir)
     second.start()
     done = _wait(lambda: _job(c, job_id)["state"] == "succeeded", timeout=LEASE * 4 + START_WAIT)
     job = _job(c, job_id, admin=True)
     assert done, job
     assert job["node_id"] == second.node_id and job["attempt"] == 2 and job["requeues"] == 1
-    assert any(m.startswith("requeued: lease expired") for m in _messages(c, job_id))
+    messages = _messages(c, job_id)
+    [requeued] = [m for m in messages if m.startswith("requeued: lease expired")]
+    resumed_at = int(requeued.split("resumes from checkpoint at ")[1].split()[0])
+    assert resumed_at >= 50, "completed progress must survive the node"
+    # The new node's own log: it installed the verified checkpoint before starting, so it
+    # continued from there rather than from zero (a restart would also verify).
+    resumed = [m for m in messages if m.startswith("resumed from central checkpoint")]
+    assert len(resumed) == 1 and resumed[0].endswith(f" at {resumed_at} units"), messages
+    # Exactly-once over the units: the checksum covers every index once, so any unit
+    # lost or repeated across the migration would fail verification.
     assert c.http.get(f"/jobs/{job_id}/result", headers=c.user).json()["verified"] is True

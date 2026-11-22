@@ -49,6 +49,8 @@ The prefixes let each endpoint reject the wrong credential type immediately. A n
 | `POST /agent/credential/rotate` | node credential | → `{node_credential}`; the old credential stays valid until the new one is first used | [implemented] |
 | `PUT /agent/inventory` | node credential | `{inventory}` → 204 | [implemented] |
 | `POST /agent/jobs/sync` | node credential | `{protocol_version, reports[], capacity}` → `{assignments[], cancel[], acknowledged[], lease_seconds}`; reconciling and idempotent; see [execution-pipeline.md](../architecture/execution-pipeline.md) | [implemented] |
+| `PUT /agent/jobs/{id}/checkpoint` | node credential, current attempt | `{attempt, version, units_done, sha256, payload_b64}` → 204. Atomic and validated (hash, catalog consistency, monotonic progress and version); 409 if stale or fenced, 422 if corrupt | [implemented] |
+| `GET /agent/jobs/{id}/checkpoint?attempt=N` | node credential, current attempt | → `{version, units_done, sha256, payload_b64}`; 409 for any node but the current assignee | [implemented] |
 
 ## Health
 

@@ -26,6 +26,7 @@ MAX_TOTAL_UNITS = 10_000_000
 MAX_REPORTS_PER_SYNC = 64
 MAX_LOG_LINES_PER_REPORT = 50
 MAX_ASSIGNMENTS_PER_SYNC = 8
+MAX_CHECKPOINT_BYTES = 1 * 2**20  # one atomic upload; larger state needs chunking (future)
 
 
 class _Contract(BaseModel):
@@ -113,10 +114,61 @@ class JobSyncRequest(_Contract):
     capacity: NodeJobCapacity
 
 
+class CheckpointRef(_Contract):
+    """A centrally stored checkpoint the new assignee should resume from."""
+
+    version: int = Field(ge=1, description="increases with every accepted upload")
+    units_done: int = Field(ge=0, le=MAX_TOTAL_UNITS)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    size: int = Field(ge=1, le=MAX_CHECKPOINT_BYTES)
+
+
 class JobAssignment(_Contract):
     job_id: UUID
     attempt: int = Field(ge=1)
     spec: JobSpec
+    checkpoint: CheckpointRef | None = Field(
+        default=None, description="resume from this; download it before starting"
+    )
+
+
+class CheckpointUpload(_Contract):
+    """Uploaded by the node holding the current attempt. Atomic: the controller stores it
+    only if the hash matches and it passes validation, so a truncated or interrupted
+    upload can never replace the previous good version."""
+
+    attempt: int = Field(ge=1)
+    version: int = Field(ge=1, description="the uploader's own counter; must increase")
+    units_done: int = Field(ge=0, le=MAX_TOTAL_UNITS)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    payload_b64: str = Field(min_length=4, max_length=(MAX_CHECKPOINT_BYTES * 4) // 3 + 8)
+
+
+class CheckpointDownload(_Contract):
+    version: int = Field(ge=1)
+    units_done: int = Field(ge=0, le=MAX_TOTAL_UNITS)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    payload_b64: str
+
+
+def validate_catalog_checkpoint(payload: bytes, *, units_done: int, total_units: int) -> str | None:
+    """None if `payload` is a consistent catalog checkpoint for `units_done`, else why not.
+    The catalog workload checkpoints {"units_done", "checksum"}, where checksum is the sum
+    of i*i over the units done so far. It must equal the closed form for that prefix."""
+    import json
+
+    try:
+        data = json.loads(payload.decode("utf-8"))
+        done, checksum = int(data["units_done"]), int(data.get("checksum", -1))
+    except (ValueError, KeyError, TypeError, UnicodeDecodeError, AttributeError):
+        return "checkpoint is not valid catalog JSON"
+    if done != units_done:
+        return f"checkpoint says {done} units, upload claims {units_done}"
+    if not 0 <= done <= total_units:
+        return f"checkpoint units {done} outside 0..{total_units}"
+    if checksum != expected_checksum(done):
+        return "checkpoint checksum does not match its unit count"
+    return None
 
 
 class JobSyncResponse(_Contract):

@@ -27,7 +27,12 @@ from udcs_shared.agent_api import (
     RotateCredentialResponse,
 )
 from udcs_shared.hardware import HardwareInventory
-from udcs_shared.jobs import JobSyncRequest, JobSyncResponse
+from udcs_shared.jobs import (
+    CheckpointDownload,
+    CheckpointUpload,
+    JobSyncRequest,
+    JobSyncResponse,
+)
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
 
@@ -126,6 +131,29 @@ class ControllerClient:
 
     def sync_jobs(self, request: JobSyncRequest) -> JobSyncResponse:
         return self._parse(self._send("POST", "/agent/jobs/sync", request), JobSyncResponse)
+
+    def put_checkpoint(self, job_id: uuid.UUID, upload: CheckpointUpload) -> None:
+        self._send("PUT", f"/agent/jobs/{job_id}/checkpoint", upload)
+
+    def get_checkpoint(self, job_id: uuid.UUID, attempt: int) -> CheckpointDownload:
+        if not self._credential:
+            raise CredentialRejected("agent has no node credential")
+        try:
+            response = self._http.request(
+                "GET",
+                f"/agent/jobs/{job_id}/checkpoint",
+                params={"attempt": attempt},
+                headers={
+                    "Authorization": f"Bearer {self._credential}",
+                    "X-Request-ID": f"agent-{uuid.uuid4().hex}",
+                },
+            )
+        except httpx.TimeoutException as exc:
+            raise ControllerUnavailable(f"request to controller timed out ({exc})") from exc
+        except httpx.TransportError as exc:
+            raise ControllerUnavailable(f"cannot reach controller ({exc})") from exc
+        self._raise_for_status(response, enrolling=False)
+        return self._parse(response, CheckpointDownload)
 
     def set_credential(self, credential: str) -> None:
         self._credential = credential

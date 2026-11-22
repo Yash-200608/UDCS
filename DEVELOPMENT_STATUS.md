@@ -70,7 +70,9 @@ _Last updated: 2026-11-22. Development checkpoint on branch `feature/udcs-backgr
 | Job contracts (catalog spec, sync request and response, result checksum) | tested | `udcs_shared/jobs.py`; controller and agent tests |
 | `jobs` and `job_logs` tables, migration `0003` | tested on SQLite and PostgreSQL 16 (CI) | schema-matches-models check, migration round trip |
 | Job API: submit, list, get, cancel, logs, result; per-user limit; admin-only priority; node placement hidden from users | tested | `controller/tests/test_jobs.py` (13) |
-| Pull scheduler: offer-constrained kinds, slots and memory; GPU only on GPU-inventory nodes; GPU-first on GPU nodes; per-user fair share; atomic claim | tested, sequentially | `test_jobs.py`; **concurrent claims are untested** |
+| Pull scheduler: offer-constrained kinds, slots and memory; GPU only on GPU-inventory nodes; GPU-first on GPU nodes; per-user fair share | tested | `test_jobs.py` |
+| **Concurrent claims and updates (PostgreSQL)**: `FOR UPDATE SKIP LOCKED` candidates, conditional claim, row locks on report, reap and cancel | **tested under genuine concurrency in CI** | `test_jobs_concurrency.py`: independent sessions released by a barrier; 2 agents → 1 job, 8 agents → 6 jobs, report vs reaper; 150/150 over 50 rounds. A mutation probe with both claim guards removed failed 10/15 |
+| **Checkpoint migration**: central versioned store; atomic, hash-checked and validated uploads; fenced upload and download; resume on another node before the workload starts; stale and corrupt versions rejected; checkpoints dropped on finish or failure | **tested** | `test_jobs.py` (5 new), `test_job_sync.py` (7 new), e2e: the job resumes on a second node after the first node *and its disk* are gone, with a verified result |
 | Leases, requeue, fencing (stale attempt or wrong node), restart grace, failure and requeue limits, lost assignments | tested (3 of 4 key mutations killed; the claim-guard mutation survives) | `test_jobs.py` |
 | Result verification (Σ i² checksum, checkpointed with progress) | tested | unit and e2e. It detects lost or repeated units, **not** a dishonest node (T26) |
 | Agent `JobSync`: capacity offer from the governor envelope, reports, log cursors, persist-before-create, reassignment keeps progress, cancel/ack purge, orphan cleanup | tested | `node_agent/tests/test_job_sync.py` (15) |
@@ -81,7 +83,7 @@ _Last updated: 2026-11-22. Development checkpoint on branch `feature/udcs-backgr
 | Checkpoint migration between nodes; preemption; predictive availability; quotas beyond the per-user limit | pending | — |
 | User-supplied code (containers or sandbox) | **blocked** on D-3 | — |
 
-Test run, 2026-11-22 (local, Windows 11): **192 passed** (full suite, 6 min), and ruff is clean.
+Test run, 2026-11-22 (local, Windows 11): **204 passed and 15 skipped** (the PostgreSQL race tests skip on SQLite), and ruff is clean.
 - **Intermittent failures.** In an earlier full run, `test_memory_class_is_paused_while_a_student_is_active` and the e2e cancel test each failed once. Neither reproduced in isolated reruns (3×) or in the next full run.
 - **Cause.** Not identified. The suspicion is timing under load, because both wait on real process start and stop. Treat them as **known flaky** until explained.
 
@@ -93,6 +95,22 @@ Bugs found and fixed while building it:
 - **CPU time was lost for short jobs:** they finished between syncs, so the manager now keeps cumulative CPU per workload.
 - **Cancelled workload directories survived:** Windows would not delete a just-terminated process's working directory, so the manager now waits for the exit and retries the purge.
 
+### Concurrency hardening and checkpoint migration (2026-11-22)
+
+**Races fixed** (found by analysing the code while writing the race tests; the tests then confirmed the fixes):
+- **Lost updates:** a node's report and another node's lease reaper or a user's cancel could overwrite each other, for example requeuing a job that had just succeeded. Every read-modify-write now locks the job row.
+- **Possible claimer deadlock:** syncs sort candidates differently, so two claimers could lock rows in different orders. Candidates are now locked `SKIP LOCKED`, so claimers never wait on each other.
+
+**First race-test failure:** the first CI run of the race tests failed in 5 rounds. The cause was a test bug, not a race: the drain loop did not report held jobs, so the controller correctly requeued them as lost. It is fixed, and the race-phase assertion had passed every time.
+
+**What resumes now:** a requeued job resumes from its last uploaded checkpoint on any node. At most one upload interval of work is repeated (15 s by default).
+
+**Still open:**
+- checkpoints over 1 MiB (chunked uploads) and object storage for big state;
+- checkpoint history (only the latest version is kept);
+- integrity for user workloads (D-3);
+- forgery by a dishonest node (T26/T29).
+
 ### M2a engineering review
 
 **Achieved and verified:**
@@ -102,9 +120,7 @@ Bugs found and fixed while building it:
 **Weak or unverified:**
 - the agent under the real service;
 - separate machines;
-- concurrent claims;
 - the result checksum is not attestation;
-- the requeue restarts from zero, because checkpoints stay on the node;
 - logs are lifecycle-only;
 - the start-up delay before a node takes work;
 - 2 intermittently failing tests.
@@ -115,8 +131,8 @@ Bugs found and fixed while building it:
 
 **Next, in priority order:**
 1. The elevated service acceptance, now including the pipeline.
-2. A concurrency test of the claim on PostgreSQL (two connections).
-3. Checkpoint upload or migration, so requeued work need not restart.
+2. ~~A concurrency test of the claim~~: done (PostgreSQL race tests in CI).
+3. ~~Checkpoint migration~~: done (central, verified, fenced).
 4. The D-3 isolation decision, which unblocks user code.
 
 ## Acceptance gates still open for M1.5
