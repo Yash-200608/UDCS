@@ -154,6 +154,31 @@ def main() -> int:
     except OSError as exc:
         print("F skipped:", exc)
     ac.delete_profile("udcs.ciprobe")
+    # G: the real catalog workload through the isolation adapter, with its traceback
+    import tempfile
+
+    from udcs_agent.workloads.isolation import AppContainerIsolation
+
+    data = Path(tempfile.mkdtemp(prefix="udcs-probe-"))
+    iso = AppContainerIsolation(data)
+    workdir = data / "w"
+    job = JobObject()
+    try:
+        process = iso.launch(
+            "probe-cpu",
+            "synthetic",
+            ["--kind", "cpu", "--dir", str(workdir), "--total-units", "3", "--memory-mb", "16"],
+            job,
+            workdir,
+        )
+        print(
+            f"G catalog cpu workload via adapter exit=0x{(process.wait(60) or 0) & 0xFFFFFFFF:08X}"
+        )
+        error = workdir / "workload-error.txt"
+        print(error.read_text() if error.exists() else "G: no workload-error.txt")
+    finally:
+        job.close()
+        iso.release("probe-cpu")
     return 0
 
 

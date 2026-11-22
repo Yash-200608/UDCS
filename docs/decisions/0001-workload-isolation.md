@@ -59,6 +59,24 @@ Labels: **[doc]** = primary documentation, **[measured]** = on the dev PC (i5-65
 
 **Cancellation:** terminating the job killed the probe and its child.
 
+## Privileged-parent findings (from CI; the service itself has not run this yet)
+
+The GitHub Windows runner (an elevated administrator, build 26100) killed every AppContainer child at start with `0xC0000142` (DLL init failed). A fast diagnostic (`tools/experiments/appcontainer_ci_probe.py`) isolated the cause.
+
+**Not the cause:** the desktop. With the caller's own token the same launch worked.
+
+**The cause:** the restricted token. With Administrators deny-only, an elevated admin token still names Administrators as its owner and in its default DACL, so the child cannot open its own process objects. LocalSystem tokens are built the same way, so the installed service would very likely have failed identically.
+
+**Fix:**
+- set the restricted token's owner to the user SID;
+- set its default DACL to the user, SYSTEM and the workload's package SID.
+
+**Workload desktop:** workloads also start on a dedicated desktop, never the student's.
+- *As an admin or SYSTEM:* a private window station `UDCSWorkloads\Workloads`, granted only to the runtime capability.
+- *Otherwise:* a private desktop, adding a minimal grant on the current window station only if it is not the interactive `WinSta0`.
+
+**Verified after the fix, on the runner:** `cmd` and Python start inside the AppContainer.
+
 ## Consequences and limits
 
 - **One-time grant cost:** read/execute is granted on the interpreter directory once per node (41.6 s measured on first propagation).
