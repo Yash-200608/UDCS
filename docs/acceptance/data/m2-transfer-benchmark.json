@@ -1,0 +1,60 @@
+{
+ "machine_note": "loopback TLS on one PC (i5-6500, SSD)",
+ "file_mib": 64,
+ "upload_random.bin": {
+  "mib": 64.0,
+  "seconds": 4.22,
+  "mib_per_s": 15.2,
+  "wire_mib": 64.0,
+  "wire_ratio": 1.0
+ },
+ "reupload_random.bin": {
+  "skipped": true,
+  "seconds": 0.205,
+  "note": "includes hashing the local file to learn its digest"
+ },
+ "upload_text.csv": {
+  "mib": 64.0,
+  "seconds": 4.08,
+  "mib_per_s": 15.7,
+  "wire_mib": 7.5,
+  "wire_ratio": 0.117
+ },
+ "reupload_text.csv": {
+  "skipped": true,
+  "seconds": 0.205,
+  "note": "includes hashing the local file to learn its digest"
+ },
+ "upload_200_small_files": {
+  "seconds": 14.77,
+  "files_per_s": 13.5,
+  "note": "per-file round trips (start, chunk, complete) dominate"
+ },
+ "resume_after_interruption": {
+  "resumed_from_mib": 24.0,
+  "resent_mib": 40.0,
+  "total_mib": 64,
+  "seconds": 1.1
+ },
+ "download_random.bin": {
+  "mib_per_s": 94.6,
+  "seconds": 0.68,
+  "includes": "transfer plus full SHA-256 verification"
+ },
+ "download_resume": {
+  "already_had_mib": 32.0,
+  "fetched_mib": 32.0
+ },
+ "storage": {
+  "logical_mib": 192.78,
+  "blob_store_mib": 192.39,
+  "dedup_saving_mib": 0.39,
+  "manifest_bytes_200_files": 22308,
+  "manifest_bytes_per_file": 111.5,
+  "database_mib": 0.42
+ },
+ "stage_200_files": {
+  "seconds": 0.482,
+  "note": "copy with SHA-256 verification of every byte"
+ }
+}

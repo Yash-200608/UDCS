@@ -36,7 +36,7 @@ import uuid
 from collections import Counter
 from datetime import datetime, timedelta
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, true, update
 from sqlalchemy.orm import Session
 
 from udcs_controller.auth.models import User
@@ -101,6 +101,7 @@ def submit_job(
     priority: int,
     now: datetime,
     settings: Settings,
+    package_digest: str | None = None,
 ) -> Job:
     active = db.scalar(
         select(func.count())
@@ -111,6 +112,7 @@ def submit_job(
         raise JobRejected(f"at most {settings.max_active_jobs_per_user} unfinished jobs per user")
     job = Job(
         owner_id=owner.id,
+        package_digest=package_digest,
         name=name,
         kind=spec.kind,
         total_units=spec.total_units,
@@ -143,7 +145,12 @@ def cancel_job(db: Session, job: Job, *, now: datetime, reason: str) -> None:
 
 
 def spec_of(job: Job) -> JobSpec:
-    return JobSpec(kind=job.kind, total_units=job.total_units, memory_mb=job.memory_mb)
+    return JobSpec(
+        kind=job.kind,
+        total_units=job.total_units,
+        memory_mb=job.memory_mb,
+        package=job.package_digest,
+    )
 
 
 # -- transitions ---------------------------------------------------------------------------
@@ -372,6 +379,14 @@ def _assign(
     candidates = db.scalars(
         select(Job)
         .where(Job.state == JobState.QUEUED, Job.kind.in_(sorted(kinds)))
+        # User code goes only to nodes that explicitly offer it (none do yet: ADR 0001 gates).
+        # User-code jobs need both the controller's kill switch and the node's own
+        # flag; either one off means only catalog jobs are handed out.
+        .where(
+            true()
+            if settings.user_code_enabled and capacity.user_code
+            else Job.package_digest.is_(None)
+        )
         .order_by(Job.priority.desc(), Job.queued_at.asc())
         .limit(_CANDIDATE_WINDOW)
         .with_for_update(skip_locked=True)  # concurrent syncs see disjoint candidates

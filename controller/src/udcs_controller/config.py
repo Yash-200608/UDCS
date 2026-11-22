@@ -8,11 +8,18 @@ than one that refuses to start.
 from __future__ import annotations
 
 from datetime import timedelta
+from functools import lru_cache
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from udcs_shared.agent_api import MAX_HEARTBEAT_SECONDS, MIN_HEARTBEAT_SECONDS
+from udcs_shared.packages import PackagePolicy
+
+
+@lru_cache(maxsize=8)
+def _parse_policy(raw: str) -> PackagePolicy:
+    return PackagePolicy.model_validate_json(raw)
 
 
 class Settings(BaseSettings):
@@ -39,6 +46,13 @@ class Settings(BaseSettings):
     job_max_requeues: int = Field(default=10, ge=1, le=100)
     max_active_jobs_per_user: int = Field(default=50, ge=1, le=100_000)
     job_log_lines_max: int = Field(default=500, ge=50, le=100_000)
+    # User code (ADR 0001/0002). OFF until every ADR gate has passed; packaging, storage and
+    # staging work regardless, but no package job is accepted while this is false.
+    user_code_enabled: bool = False
+    blob_dir: str = Field(default="var/blobs", description="content-addressed store root")
+    package_policy_json: str = Field(
+        default="{}", description="PackagePolicy overrides as JSON (limits are policy-driven)"
+    )
     log_level: str = Field(default="INFO", pattern=r"^(DEBUG|INFO|WARNING|ERROR)$")
     log_json: bool = True
 
@@ -47,6 +61,10 @@ class Settings(BaseSettings):
         return timedelta(
             seconds=self.heartbeat_interval_seconds * self.offline_after_missed_heartbeats
         )
+
+    @property
+    def package_policy(self) -> PackagePolicy:  # read on every request; parsed once
+        return _parse_policy(self.package_policy_json or "{}")
 
     @property
     def job_lease(self) -> timedelta:

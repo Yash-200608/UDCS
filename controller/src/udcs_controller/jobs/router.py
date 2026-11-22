@@ -71,6 +71,22 @@ def to_out(job: Job, *, show_node: bool) -> JobOut:
     )
 
 
+def _package_for(body: JobCreate, auth: AuthContext, request: Request, db) -> str | None:
+    """User code is refused outright while the feature flag is off (ADR 0001 gates)."""
+    if body.package is None:
+        return None
+    if not request.app.state.settings.user_code_enabled:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, detail="user code execution is disabled on this deployment"
+        )
+    from udcs_controller.packages.service import PackageError, usable_package
+
+    try:
+        return usable_package(db, body.package, auth.user).digest
+    except PackageError as exc:
+        raise HTTPException(exc.status_code, detail=exc.detail) from None
+
+
 @router.post("", response_model=JobOut, status_code=status.HTTP_201_CREATED)
 def submit(body: JobCreate, auth: SubmitJobs, request: Request, db: DbSession, now: Now) -> JobOut:
     if body.priority > 0 and not _manager(auth):
@@ -79,7 +95,13 @@ def submit(body: JobCreate, auth: SubmitJobs, request: Request, db: DbSession, n
         job = service.submit_job(
             db,
             owner=auth.user,
-            spec=JobSpec(kind=body.kind, total_units=body.total_units, memory_mb=body.memory_mb),
+            spec=JobSpec(
+                kind=body.kind,
+                total_units=body.total_units,
+                memory_mb=body.memory_mb,
+                package=body.package,
+            ),
+            package_digest=_package_for(body, auth, request, db),
             name=body.name,
             priority=body.priority,
             now=now,

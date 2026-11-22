@@ -17,6 +17,11 @@ class JobCreate(BaseModel):
     total_units: int = Field(ge=1, le=MAX_TOTAL_UNITS)
     memory_mb: int = Field(default=256, ge=16, le=4096)
     priority: int = Field(default=0, ge=0, le=100, description="above 0 requires manage_jobs")
+    package: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+        description="a registered user-code package; refused while user code is disabled",
+    )
 
 
 class JobOut(BaseModel):

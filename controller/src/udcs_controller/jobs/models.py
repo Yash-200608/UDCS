@@ -49,6 +49,12 @@ class Job(Base):
     memory_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
     result: Mapped[dict[str, Any] | None] = mapped_column(JSONType, nullable=True)
     error: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    # User code (ADR 0002): the package to run, and what it produced. Both are None for
+    # catalog jobs. Package jobs are only accepted while user code is enabled.
+    package_digest: Mapped[str | None] = mapped_column(
+        ForeignKey("packages.digest", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    output_manifest: Mapped[dict[str, Any] | None] = mapped_column(JSONType, nullable=True)
 
 
 class JobLog(Base):

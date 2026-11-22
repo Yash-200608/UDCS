@@ -78,7 +78,12 @@ def test_full_lifecycle_submit_assign_run_succeed_and_fetch_result(
     sync = _sync(client, node)
     [assignment] = sync["assignments"]
     assert assignment["job_id"] == job["id"] and assignment["attempt"] == 1
-    assert assignment["spec"] == {"kind": "cpu", "total_units": 25, "memory_mb": 256}
+    assert assignment["spec"] == {
+        "kind": "cpu",
+        "total_units": 25,
+        "memory_mb": 256,
+        "package": None,
+    }
     assert _job(client, student_headers, job["id"])["state"] == "assigned"
 
     _sync(client, node, [_report(assignment, "waiting")], accept=False)

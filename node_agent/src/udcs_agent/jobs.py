@@ -55,6 +55,9 @@ from udcs_shared.protection import ProtectionLevel, WorkloadClass
 logger = logging.getLogger(__name__)
 
 WORKLOAD_PREFIX = "job-"
+# User code stays off on every node until ADR 0001's remaining gates pass. It is a
+# constant, not configuration, so it cannot be switched on by a config file on a lab PC.
+USER_CODE_ENABLED = False
 READD_AFTER_SECONDS = 10.0
 _NO_NEW_WORK_LEVELS = {
     ProtectionLevel.CONSTRAINED,
@@ -106,6 +109,7 @@ class JobSync:
         self._log_cursor: dict[str, float] = {}  # manager event times are per-process
         self._pending_cursor: dict[str, float] = {}
         self._last_offer = ""
+        self._refused: dict[str, int] = {}  # user-code assignments refused, until acknowledged
 
     # -- persistence ---------------------------------------------------------------------------
 
@@ -205,6 +209,16 @@ class JobSync:
         if offer != self._last_offer:  # log changes only, not every sync
             logger.info("job offer: %s", offer)
             self._last_offer = offer
+        for job_id, attempt in self._refused.items():
+            reports.append(
+                AgentJobReport(
+                    job_id=uuid.UUID(job_id),
+                    attempt=attempt,
+                    state=LocalJobState.FAILED,
+                    units_done=0,
+                    error="user code execution is disabled on this node",
+                )
+            )
         return JobSyncRequest(protocol_version=PROTOCOL_VERSION, reports=reports, capacity=capacity)
 
     def _report(
@@ -264,6 +278,8 @@ class JobSync:
         self._log_cursor.update(self._pending_cursor)
         self._pending_cursor = {}
         self._notes = {}  # delivered with the request this response answers
+        for job_id in [*response.cancel, *response.acknowledged]:
+            self._refused.pop(str(job_id), None)
         # Removals first, so a job that was acknowledged and then reassigned in the same
         # response starts from a clean directory.
         for job_id in [*response.cancel, *response.acknowledged]:
@@ -280,6 +296,12 @@ class JobSync:
             logger.info("job %s %s", key, why)
         for assignment in response.assignments:
             key = str(assignment.job_id)
+            if assignment.spec.package is not None and not USER_CODE_ENABLED:
+                # Defence in depth: this node never offers user code, so the controller
+                # should never send it. If it does, refuse and run nothing.
+                self._refused[key] = assignment.attempt
+                logger.error("refused user-code job %s: user code is disabled", key)
+                continue
             entry = self._assignments.get(key)
             if entry is not None:
                 if int(entry["attempt"]) < assignment.attempt:

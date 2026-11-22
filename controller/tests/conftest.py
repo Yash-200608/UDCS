@@ -52,7 +52,7 @@ def settings(tmp_path) -> Settings:
     )
     if os.environ.get("UDCS_REQUIRE_POSTGRES") == "1" and not url.startswith("postgresql"):
         pytest.fail("UDCS_REQUIRE_POSTGRES=1 but the test database is not PostgreSQL")
-    return Settings(database_url=url, log_json=False)
+    return Settings(database_url=url, log_json=False, blob_dir=str(tmp_path / "blobs"))
 
 
 @pytest.fixture

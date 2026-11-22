@@ -90,4 +90,4 @@ The GitHub Windows runner (an elevated administrator, build 26100) killed every 
 
 1. ~~`tools/acceptance/m2_isolation_service_acceptance.ps1` passes from the installed service (LocalSystem, session 0).~~ **PASSED 2026-11-22.** All 16 prohibited operations were denied, and each was possible for the SYSTEM control (lsass included). The token was privilege-free despite the LocalSystem parent, and the tree kill worked (`docs/acceptance/data/m2-isolation-service.json`).
 2. A review of what ALL APPLICATION PACKAGES exposes on a lab image (Deep Freeze, Office, campus software).
-3. A user-code packaging design: inputs, outputs, dependencies and size limits.
+3. ~~A user-code packaging design: inputs, outputs, dependencies and size limits.~~ **Design and delivery met 2026-11-22: [ADR 0002](0002-user-code-packaging.md).** It is implemented and security-reviewed (11 findings fixed and regression-tested), and nothing executes. Enabling execution still needs gate 2 and the prerequisites in ADR 0002 ("Before enabling user code").

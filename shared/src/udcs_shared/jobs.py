@@ -64,6 +64,11 @@ class JobSpec(_Contract):
     kind: WorkloadClass
     total_units: int = Field(ge=1, le=MAX_TOTAL_UNITS, description="units of ~50 ms of work")
     memory_mb: int = Field(default=256, ge=16, le=4096, description="memory-class buffer size")
+    package: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+        description="user-code package digest (ADR 0002); `kind` is then its resource class",
+    )
 
 
 class JobResult(_Contract):
@@ -106,6 +111,9 @@ class NodeJobCapacity(_Contract):
     kinds: list[WorkloadClass] = Field(default_factory=list, max_length=4)
     memory_available_mb: int = Field(ge=0, le=10_000_000)
     reason: str = Field(default="", max_length=64, description="why nothing is accepted")
+    user_code: bool = Field(
+        default=False, description="the node accepts user-code packages (off until ADR gates pass)"
+    )
 
 
 class JobSyncRequest(_Contract):

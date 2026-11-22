@@ -70,3 +70,23 @@ Scope: M1 (control plane, enrollment, telemetry), plus the threats that M2 execu
 | T27 | Students learn which lab PC runs whose job | `node_id` is shown only to `manage_jobs`; jobs of other users are 404, not 403 | [implemented, tested] |
 | T29 | A stale, partitioned or corrupt node poisons a job's checkpoint, or another node is fed a bad one | Uploads are accepted only from the current attempt's node, after SHA-256 and catalog-consistency checks and with monotonic progress; downloads are verified the same way before use; an unusable checkpoint means starting from zero. A *dishonest* node can still forge a consistent catalog checkpoint (as with T26) | [implemented, tested]; forgery by a dishonest node is open |
 | T28 | A user floods the queue | Per-user unfinished-job limit (`max_active_jobs_per_user`, 429); priority above 0 is admin-only | [implemented, tested]; no per-lab or time quota yet |
+
+## User-code packaging additions (ADR 0002)
+
+User code execution is **disabled**. These threats concern delivery and staging, which are implemented and tested without running anything.
+
+| # | Threat | Mitigation | Status |
+|---|---|---|---|
+| T30 | Malicious archive: zip-slip, symlink or hardlink entries, duplicate entries, parser bugs | No archives: a package is a JSON manifest plus content-addressed files, so there is nothing to unpack | [implemented, tested] |
+| T31 | Path traversal or Windows path tricks in a manifest (`..`, drives, UNC, `:` streams, device names, trailing dots, case-insensitive duplicates, file/directory clashes) | `path_problem` plus structural validation; nodes re-check every path and that it resolves inside the staging root | [implemented, tested] |
+| T32 | Junction or symlink escape when packing, staging, collecting outputs or cleaning up | Reparse points refused at packing and staging. Outputs are opened by handle without following links, and the handle's final path must be inside `out/`. Cleanup never follows a junction | [implemented, tested] on NTFS junctions |
+| T33 | Hard link in outputs exports a file from elsewhere; cleanup modifies a link target | Output handle must have exactly one link; cleanup deletes without changing attributes | [implemented, tested] |
+| T34 | Oversized or bomb uploads (decompression bombs, huge bodies, endless sessions) | Bounded zlib (`max_length = raw + 1`, ratio limit); body-limit middleware before buffering; per-file, package, transfer, session and quota limits, all policy | [implemented, tested] |
+| T35 | Content substitution: bytes changed in transit, in the store or in a node cache | SHA-256 per chunk, of the whole blob before it is named, before entering the node cache, and again while staging | [implemented, tested] |
+| T36 | Dependency confusion or typosquatting | No package index on nodes or in workloads (no network). Only exact pins, satisfied by an admin-approved, content-addressed environment | [implemented, tested] |
+| T37 | Install or build scripts run on the host (`setup.py`, build backends, `.pth` hooks) | Nothing is installed or built on nodes; environments are wheel-only, built off-fleet and approved; `.pth` is refused; Python runs with `-I -S` | [implemented, tested] for refusal; execution itself disabled |
+| T38 | Hash as a capability: learning or reading another user's file by knowing its digest | Transfer is skipped only for blobs the caller owns; downloads and package references need ownership; nodes may read only their current attempt's closure | [implemented, tested] |
+| T39 | A node grants the job owner someone else's blob through an output manifest | An output must have been uploaded in full by that node for that attempt; one manifest per attempt; the same error for missing and foreign blobs | [implemented, tested] (review finding F1, high) |
+| T40 | A node fills the controller's storage | Per-attempt output budget at session start; uploads only for the current, active attempt; dead sessions swept | [implemented, tested]; unreferenced-blob GC not built |
+| T41 | User code reaches nodes while it is meant to be off | Two independent switches: a controller flag checked at dispatch and on node endpoints, and an agent constant that refuses package assignments | [implemented, tested]; per-node admin eligibility not built (needed before enabling) |
+| T42 | Registering someone's content first locks them out | Package ownership is per user (`package_owners`) | [implemented, tested] |

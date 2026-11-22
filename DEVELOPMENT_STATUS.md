@@ -9,7 +9,8 @@ _Last updated: 2026-11-22. Development checkpoint on branch `feature/udcs-backgr
 | M1: Working Foundation | **Met**, verified live over TLS on one Windows 11 PC. The "no terminal" gap is now covered by the M1.5 service, which is not yet verified as a service. |
 | M1.5: Background Service & Local Resource Protection | **Implemented. Tested without admin rights. NOT accepted.** Six acceptance gates are still open (see below). Report: [docs/acceptance/milestone-1.5.md](docs/acceptance/milestone-1.5.md) |
 | M2a: Distributed execution pipeline (catalog workloads only) | **Implemented and tested** on one PC with two agent instances: controller → scheduler → agent → Job Object workload → telemetry → verified result, plus recovery. See [execution-pipeline.md](docs/architecture/execution-pipeline.md) |
-| M2b: Isolation for workloads (D-3) | **Decided: [ADR 0001](docs/decisions/0001-workload-isolation.md). Native AppContainer backend implemented and tested; the catalog runs inside it where a node verifies it.** **Service-path gate passed** (2026-11-22, SYSTEM in session 0). User code is still **disabled**: ADR gates 2 (review of what ALL APPLICATION PACKAGES exposes on a lab image) and 3 (packaging design) are open |
+| M2b: Isolation for workloads (D-3) | **Decided: [ADR 0001](docs/decisions/0001-workload-isolation.md). Native AppContainer backend implemented and tested; the catalog runs inside it where a node verifies it.** **Service-path gate passed** (2026-11-22, SYSTEM in session 0). User code is still **disabled**: ADR gate 2 (review of what ALL APPLICATION PACKAGES exposes on a lab image) is open |
+| ADR 0001 gate 3: user-code packaging and delivery | **Implemented, tested and security-reviewed** ([ADR 0002](docs/decisions/0002-user-code-packaging.md)). Manifest, validator, CAS, resumable chunked transfer, node staging and outputs work end to end **without executing anything**. All 11 review findings are fixed and regression-tested. Execution is still disabled by two switches |
 
 ## Status legend
 
@@ -152,6 +153,31 @@ Decision: [ADR 0001](docs/decisions/0001-workload-isolation.md).
 - AppContainer process start is about 0.12 s for Python, and the detection launch takes about 0.6 s;
 - the one-time grant on the interpreter directory takes 41.6 s per node.
 
+### User-code packaging and delivery (ADR 0001 gate 3, 2026-11-22)
+
+Decision: [ADR 0002](docs/decisions/0002-user-code-packaging.md). **Nothing executes:** controller `user_code_enabled = false` (checked at dispatch and on every node package endpoint) and agent `USER_CODE_ENABLED = False`.
+
+| Component | State | Evidence |
+|---|---|---|
+| Versioned manifest (`udcs_shared.packages`): SHA-256 for every file, canonical digest, path rules (traversal, drives, UNC, ADS, device names, NFC, case-insensitive duplicates), kinds package/environment/dataset | tested | `test_packages.py` (parametrised attacks) |
+| `PackagePolicy`: every limit configurable (`UDCS_PACKAGE_POLICY`) | tested | `test_policy_limits_are_configurable_not_hardcoded` |
+| Controller CAS: chunked, resumable uploads with a SHA-256 per chunk, bounded zlib, full hash before naming, global storage dedup, no cross-user oracle, quotas, session sweep | tested | `test_packages.py` |
+| Dependencies: exact pins only, from admin-approved wheel-only environments; Python version match; `.pth` refused | tested | `test_environment_and_dataset_rules`, `test_registration_checks_sizes_and_approvals` |
+| Scheduling integration: package jobs only to nodes offering user code *and* only with the controller flag on; fenced node downloads | tested | end-to-end and kill-switch tests |
+| Node: verified Range-resumable fetch into a CAS cache, per-attempt read-only staging re-hashing every byte, handle-based output collection into a private snapshot, junction- and hardlink-safe cleanup | tested (NTFS) | `test_packages_windows.py` (10) |
+| Outputs: chunked node upload bounded per attempt, possession-checked manifest, owner download with Range | tested | `test_outputs_cannot_claim_another_users_blob` and others |
+| Adversarial security review | **11 findings fixed** (1 high, 6 medium, 4 low); 13 of 13 fix mutations caught | ADR 0002 "Review findings" |
+
+**Measured** (loopback TLS, one PC):
+- upload 15.2 MiB/s; compressible data 0.117× on the wire;
+- download with verification 94.6 MiB/s;
+- resume re-sends exactly the missing bytes (upload and download);
+- 200 small files at 13.5 files/s (**weak**: per-file round trips);
+- staging 200 files in 0.48 s;
+- storage overhead: blob store 192.39 MiB for 192.78 MiB logical, about 111 B of manifest per file, database 0.42 MiB.
+
+**Not done:** unreferenced-blob GC and a periodic sweep; per-node admin eligibility for user code; node Python-version matching in the scheduler; per-group dataset access; a batch upload endpoint; a standalone client; attestation against a dishonest node (T26).
+
 ### M2a engineering review
 
 **Achieved and verified:**
@@ -221,13 +247,13 @@ Do not report an item as passed until it is.
 
 ## Test results
 
-Pre-commit run, 2026-11-22 (Windows 11, Python 3.12, SQLite):
+Pre-commit run, 2026-11-22, after the gate 3 review fixes (Windows 11, Python 3.12, SQLite):
 
 | Check | Result |
 |---|---|
-| `uv run pytest` | **158 passed**, 1 third-party deprecation warning (Starlette test client) |
+| `uv run pytest` | **289 passed**, 15 skipped (PostgreSQL-only race tests), third-party deprecation warnings only |
 | `ruff check .` | clean |
-| `ruff format --check .` | clean (111 files) |
+| `ruff format --check .` | clean (144 files) |
 | GitHub Actions `test-windows` (run 44985979000) | 157 passed, 1 skipped (no NVIDIA driver on the runner) |
 | GitHub Actions `test-postgres` (run 44985979000) | 57 passed on PostgreSQL 16 |
 
@@ -252,6 +278,7 @@ Not covered by this run:
 |---|---|
 | D-2: native session helper | open |
 | D-3: execution isolation | **decided**: native AppContainer now; MXC for 24H2+ nodes later (ADR 0001) |
+| Enabling user code | **not yet**: needs ADR 0001 gate 2 (lab-image review) and per-node admin eligibility (ADR 0002) |
 | D-4: power policy | open |
 | Repository license | none chosen |
 | Differentiator versus HTCondor | needs to be written before M3 |
@@ -272,3 +299,7 @@ Not covered by this run:
   - Benchmark harness fixes:
     - the response wait now covers the 120 s grace plus the 30 s relax period;
     - the first all-core result (+33.5%) was noise, as an interleaved retest showed.
+- **2026-11-22, ADR 0001 gate 3 (packaging and delivery).**
+  - Implemented manifest, validator, CAS, resumable chunked transfer, node staging and outputs, with no execution.
+  - The adversarial review found 11 issues. The high-severity one: an output manifest could grant the job owner any blob in the store. All are fixed, with regression tests and 13 of 13 fix mutations caught.
+  - Full suite on Windows: 289 passed, 15 skipped (these need PostgreSQL).
