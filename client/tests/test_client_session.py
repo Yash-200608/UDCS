@@ -82,6 +82,8 @@ def test_windows_session_is_dpapi_protected_in_user_scope(isolated_config):
 def test_a_corrupt_session_is_reported_not_crashed(isolated_config):
     isolated_config.mkdir(parents=True, exist_ok=True)
     (isolated_config / "session").write_bytes(b"garbage")
+    if sys.platform != "win32":
+        os.chmod(isolated_config / "session", 0o600)  # private, so only the content is wrong
     with pytest.raises(ClientError, match="unreadable"):
         load_session()
 
