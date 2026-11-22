@@ -77,6 +77,8 @@ The GitHub Windows runner (an elevated administrator, build 26100) killed every 
 
 **Verified after the fix, on the runner:** `cmd` and Python start inside the AppContainer.
 
+**Second finding:** grants must also satisfy the *normal* half of the access check. With Administrators deny-only, an elevated-admin parent's workload could not write a workdir whose ACL granted only Administrators. The catalog workload exited 1 without even writing its error file. Grants on the workdir, inputs, runtime and interpreter now also name the agent's own user SID: SYSTEM for the service, the user otherwise. That gives nothing to any other identity. Verified on the runner: the catalog workload completes (`appcontainer_ci_probe.py` variant G).
+
 ## Consequences and limits
 
 - **One-time grant cost:** read/execute is granted on the interpreter directory once per node (41.6 s measured on first propagation).

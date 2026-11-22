@@ -144,6 +144,8 @@ Decision: [ADR 0001](docs/decisions/0001-workload-isolation.md).
 - `synthetic.py` passed an invalid 32-bit handle to `SetPriorityClass`. Windows ignored it on the host, so **background mode was never applied before**; inside AppContainer it crashed.
 - The self-test's unsandboxed control wrote into the shared runtime, which would have broken every later isolated job on a node.
 - `DeleteAppContainerProfile` reports success for unknown profiles. Leaks are now checked through the registry mapping and swept.
+- **CI after the fixes** ([45009429033](https://github.com/Yash-200608/UDCS/actions/runs/45009429033)): Windows **217 passed** (isolation self-test, catalog in AppContainer, job pipeline in AppContainer) with an elevated-admin parent on build 26100; PostgreSQL 90/90 + 150/150 races; lint clean. The real service (LocalSystem, session 0) is still not run: `m2_isolation_service_acceptance.ps1`.
+- **Grants also name the agent's own user SID** (CI): otherwise an admin-parented workload could not write an admin-only workdir.
 - **Found by CI, which is the closest thing to the service path run so far.** With an elevated-admin parent (and therefore almost certainly a LocalSystem one), the restricted token kept Administrators as owner and in its default DACL, so every AppContainer child failed with 0xC0000142. Fixed: owner and default DACL are now the user, SYSTEM and the package SID. Workloads also run on a private window station or desktop, never the student's. Verified on the runner with `tools/experiments/appcontainer_ci_probe.py`.
 
 **Measured costs:**
