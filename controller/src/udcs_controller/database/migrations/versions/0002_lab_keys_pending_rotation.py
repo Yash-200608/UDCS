@@ -147,9 +147,22 @@ def downgrade() -> None:
         INSERT INTO enrollment_tokens (id, token_hash, created_by_user_id, note, created_at,
                                        expires_at, used_at, node_id)
         SELECT k.id, k.token_hash, k.created_by_user_id, k.note, k.created_at, k.expires_at,
-               k.last_used_at, (SELECT n.id FROM nodes n WHERE n.enrollment_key_id = k.id)
+               k.last_used_at, NULL
         FROM enrollment_keys k WHERE k.max_uses = 1
         """
+    )
+    # Token -> node links are restored only after `nodes` is rebuilt. On SQLite the batch
+    # rebuild drops the old table, and with foreign keys on, that fires
+    # ON DELETE SET NULL on enrollment_tokens.node_id.
+    nodes = sa.table("nodes", sa.column("id", sa.Uuid()), sa.column("enrollment_key_id", sa.Uuid()))
+    links = (
+        op.get_bind()
+        .execute(
+            sa.select(nodes.c.enrollment_key_id, nodes.c.id).where(
+                nodes.c.enrollment_key_id.is_not(None)
+            )
+        )
+        .all()
     )
     op.execute("UPDATE nodes SET admin_state = 'maintenance' WHERE admin_state = 'pending'")
     with op.batch_alter_table("nodes", recreate="auto") as batch:
@@ -173,4 +186,9 @@ def downgrade() -> None:
             "lab",
         ):
             batch.drop_column(column)
+    tokens = sa.table(
+        "enrollment_tokens", sa.column("id", sa.Uuid()), sa.column("node_id", sa.Uuid())
+    )
+    for key_id, node_id in links:  # one node per single-use key; multi-use keys match nothing
+        op.get_bind().execute(tokens.update().where(tokens.c.id == key_id).values(node_id=node_id))
     op.drop_table("enrollment_keys")

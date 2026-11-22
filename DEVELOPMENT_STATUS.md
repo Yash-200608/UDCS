@@ -29,7 +29,8 @@ _Last updated: 2026-11-22. Development checkpoint on branch `feature/udcs-backgr
 | Controller config, app factory, health and readiness | tested | `test_auth.py` |
 | DB models plus Alembic migration `0001` | tested on SQLite | migrations ≡ models check; downgrade and upgrade round-trip |
 | Migration `0002`: lab keys, pending state, rotation | tested on SQLite | `test_schema_and_units.py`; the PostgreSQL DDL was checked only by offline rendering |
-| **PostgreSQL path** | **implemented, unverified** | CI job `test-postgres` exists but has never run |
+| **PostgreSQL path** | **implemented; CI verification in progress** | The first CI run (2026-11-22, run 44984896914) **never reached PostgreSQL**: the Linux job collected the Windows-only agent tests and crashed (`ctypes.WinDLL`). The job is now limited to the shared and controller suites, guarded by `UDCS_REQUIRE_POSTGRES=1`, and adds a clean-database `udcs-controller migrate` plus a check against the Alembic head and the models. The result is recorded in the gate list below |
+| Migration 0002 data logic (real M1 rows, up and down) | tested on SQLite | `test_migration_data.py`. It found a **bug in the 0002 downgrade**: on SQLite the batch rebuild of `nodes` triggered `ON DELETE SET NULL` and erased the token→node links. Fixed |
 | User auth: Argon2id, opaque sessions, rate limit, RBAC | tested | `test_auth.py` |
 | Admin user management | tested | `test_auth.py` |
 | Lab enrollment keys (expiry, use limit, revoke, atomic claim) | tested | `test_enrollment_identity.py` |
@@ -69,7 +70,7 @@ None of these are done. Do not report them as passed until they are.
 2. **Actual reboot and crash-recovery verification.** Run the same script, reboot, then run it with `-AfterReboot`.
 3. **Session-0 CUDA execution verification (E1 as SYSTEM).** The GT 730 detection is not evidence of workload compatibility. RTX-class hardware is still untested.
 4. **Real service resource overhead.** The 124 MiB RSS was measured in the benchmark process, not the service. The target is ≤ 80 MiB.
-5. **PostgreSQL integration through CI.** The `test-postgres` job has never run.
+5. **PostgreSQL integration through CI.** Pending the first CI run of the fixed job. Even when it passes, the model diff does not compare CHECK constraints or server defaults; the migration data test covers the `admin_state` CHECK behaviourally.
 6. **Disk interference benchmark validation.** The result is inconclusive on this machine because of baseline noise (p95 noise floor +139%).
 
 ## Measured results (one machine, not a fleet guarantee)
@@ -100,9 +101,10 @@ Pre-commit run, 2026-11-22 (Windows 11, Python 3.12, SQLite):
 
 | Check | Result |
 |---|---|
-| `uv run pytest` | **155 passed**, 1 third-party deprecation warning (Starlette test client), 91 s |
+| `uv run pytest` | **158 passed**, 1 third-party deprecation warning (Starlette test client) |
 | `ruff check .` | clean |
-| `ruff format --check .` | clean (109 files) |
+| `ruff format --check .` | clean (111 files) |
+| GitHub Actions `test-windows` (run 44984896914) | 154 passed, 1 skipped |
 
 Not covered by this run:
 - PostgreSQL, which runs only in CI;

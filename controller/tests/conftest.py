@@ -50,6 +50,8 @@ def settings(tmp_path) -> Settings:
     url = (
         os.environ.get("UDCS_TEST_DATABASE_URL") or f"sqlite:///{(tmp_path / 'udcs.db').as_posix()}"
     )
+    if os.environ.get("UDCS_REQUIRE_POSTGRES") == "1" and not url.startswith("postgresql"):
+        pytest.fail("UDCS_REQUIRE_POSTGRES=1 but the test database is not PostgreSQL")
     return Settings(database_url=url, log_json=False)
 
 
