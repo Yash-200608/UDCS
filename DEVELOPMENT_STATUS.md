@@ -283,10 +283,30 @@ The probe's first runs on this PC found three false positives in the probe itsel
 | `tools/acceptance/m2_isolation_service_acceptance.ps1` | Service-path isolation self-test (unchanged) | ready |
 | `tools/acceptance/m3_exposure_audit.ps1 -AsSystem` | The exposure audit as LocalSystem, through a temporary scheduled task, using the repository's code (the installed service is not upgraded, stopped or reconfigured) | user context run here; **the `-AsSystem` path is untested** (this session is not elevated) |
 
+**5. Diagnostic dry run on a development PC (build 26300, standard user, no service):**
+
+Diagnostics are kept apart from evidence. `udcs_agent.diagnostics.context` labels every result with the machine (a hash of its name), the image and the execution identity. A result counts as `evidence` only in the LocalSystem session-0 context. Diagnostics are written to `%LOCALAPPDATA%\UDCS\diagnostics`, never to `docs/acceptance/data`. `tests/test_acceptance_evidence.py` fails if a diagnostic lands there.
+
+Script guards:
+- `m15` pass 1 refuses to run when UDCSAgent is already installed. It also refuses when pass-1 evidence exists, unless `-ReplaceEvidence` is given, which keeps a backup of the old report.
+- `m2` writes a non-SYSTEM result as a diagnostic only. `-Diagnostic` runs the self-test as the current user.
+- The scheduled task in `m3 -AsSystem` is swept first and removed in `finally`. If the console is killed, the task expires and deletes itself within 45 minutes, and the audit is stopped after 30.
+- No script elevates itself.
+
+| Run (this PC, not elevated) | Result (diagnostic only) |
+|---|---|
+| `m3_preflight.ps1` | exit 3, NOT READY. Mismatches: not elevated, build 26300 vs 22000, GPUs differ, no reboot of the pass-1 machine, service not installed. (Fixed during the run: the reboot check passed on a *different* machine because its boot time was later; it now requires the same machine.) |
+| `m2_isolation_service_acceptance.ps1 -Diagnostic` | interactive-user context: all 21 checks and the process-tree kill passed; the temporary HKCU key was removed |
+| `m3_exposure_audit.ps1` (user) | interactive-user context, image `11\|10.0.26300`: 12 violations, the same as before; no task created |
+| not run (need elevation) | `m15` pass 1 and pass 2, `m2` service path, `m3 -AsSystem` |
+
+**Finding:** this user profile holds 14 `udcs.*` AppContainer profiles left by earlier development and test runs. These runs did not add to them, and the source of the leak has not been investigated.
+
 **Test evidence:**
 
 | Run | Result |
 |---|---|
+| Local suite without e2e, after the dry-run changes | 421 passed, 18 skipped |
 | Local full suite (this PC) | 432 passed, 19 skipped, 2 failed: the known intermittent catalog e2e tests |
 | CI run 46036973142, commit `dd7063e` | green on its second re-run: Windows full suite, PostgreSQL including migrations 0006 and 0007, lint |
 

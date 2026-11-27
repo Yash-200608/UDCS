@@ -9,9 +9,17 @@
   ProgramData\UDCS\agent), one HKLM Run value for the session helper, and runs one
   synthetic CPU validation workload. Remove everything afterwards with
   infrastructure\windows\uninstall-agent.ps1 -RemoveData.
+
+  Evidence protection:
+    - pass 1 refuses to run when the report already holds pass-1 evidence (it would be
+      overwritten) or when UDCSAgent is already installed (it would be reinstalled).
+      -ReplaceEvidence overrides only the first, and keeps a timestamped copy of the
+      old report next to it. An installed service must be removed deliberately first.
+    - pass 2 records nothing unless it runs on the pass-1 machine after a reboot.
+    - for a read-only readiness check on any PC, use m3_preflight.ps1 instead.
 #>
 [CmdletBinding()]
-param([switch]$AfterReboot, [string]$Staging)
+param([switch]$AfterReboot, [string]$Staging, [switch]$ReplaceEvidence)
 $ErrorActionPreference = 'Stop'
 $Repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $Out = Join-Path $Repo 'docs\acceptance\data\m15-service-acceptance.json'
@@ -21,7 +29,7 @@ $Service = 'UDCSAgent'
 
 $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    throw 'Run from an elevated PowerShell (Run as administrator).'
+    throw 'Run from an elevated PowerShell (Run as administrator). This script never elevates itself.'
 }
 
 function Read-Report {
@@ -30,7 +38,7 @@ function Read-Report {
 }
 function Save-Report($report) {
     New-Item -ItemType Directory -Force -Path (Split-Path $Out) | Out-Null
-    $report | ConvertTo-Json -Depth 12 | Set-Content -Path $Out -Encoding utf8
+    [IO.File]::WriteAllText($Out, ($report | ConvertTo-Json -Depth 12), (New-Object Text.UTF8Encoding $false))
 }
 function Set-Field($obj, $name, $value) {
     $obj | Add-Member -NotePropertyName $name -NotePropertyValue $value -Force
@@ -62,6 +70,22 @@ $report = Read-Report
 $python = Join-Path $Install 'python\python.exe'
 
 if (-not $AfterReboot) {
+    if (Get-Service $Service -ErrorAction SilentlyContinue) {
+        Write-Host "UDCSAgent is already installed on this PC. Pass 1 would reinstall it; nothing changed." -ForegroundColor Yellow
+        Write-Host 'After a reboot, run -AfterReboot. To start over, uninstall it deliberately first.'
+        exit 2
+    }
+    if ($report.reboot_marker -or $report.checks) {
+        if (-not $ReplaceEvidence) {
+            Write-Host "The report already holds pass-1 evidence ($Out). Nothing changed." -ForegroundColor Yellow
+            Write-Host 'Pass 1 would overwrite it. Use -ReplaceEvidence only to deliberately start a new acceptance run.'
+            exit 2
+        }
+        $backup = "$Out.replaced-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+        Copy-Item $Out $backup
+        Write-Host "Previous evidence kept at $backup" -ForegroundColor Yellow
+        $report = New-Object PSObject
+    }
     Set-Field $report 'machine' ([ordered]@{
         host = $env:COMPUTERNAME; os = (Get-CimInstance Win32_OperatingSystem).Caption
         build = [Environment]::OSVersion.Version.ToString()

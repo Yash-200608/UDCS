@@ -167,7 +167,45 @@ def cmd_audit_exposure(args: argparse.Namespace) -> int:
     for line in result["violations"][:50]:
         print("VIOLATION:", line)
     print(f"report: {out}")
+    if args.summary_out:
+        from udcs_agent.diagnostics.context import labelled
+
+        result.pop("runner", None)  # carries a user name; the identity block replaces it
+        # An exposure audit is evidence about this image only when run as LocalSystem.
+        wrapped = labelled("exposure-audit", result, evidence_context=True)
+        summary_out = Path(args.summary_out)
+        summary_out.parent.mkdir(parents=True, exist_ok=True)
+        summary_out.write_text(json.dumps(wrapped, indent=1), encoding="utf-8")
+        print(f"summary ({'evidence' if wrapped['evidence'] else 'diagnostic'}): {summary_out}")
     return 0 if result["passed"] else 1
+
+
+def cmd_isolation_selftest(args: argparse.Namespace) -> int:
+    """The isolation self-test in THIS process. Always a diagnostic: acceptance evidence
+    comes only from the installed service (m2_isolation_service_acceptance.ps1)."""
+    import json
+    import os
+
+    from udcs_agent.diagnostics.context import labelled
+    from udcs_agent.diagnostics.isolation import detect_isolation, run_selftest
+    from udcs_agent.workloads.isolation import AppContainerIsolation
+
+    data_dir = Path(
+        args.data_dir or Path(os.environ.get("LOCALAPPDATA", ".")) / "UDCS" / "isolation-selftest"
+    )
+    data_dir.mkdir(parents=True, exist_ok=True)
+    report = run_selftest(data_dir / "scratch", AppContainerIsolation(data_dir))
+    report["capabilities"] = [c.model_dump() for c in detect_isolation(data_dir)]
+    wrapped = labelled("isolation-selftest", report, evidence_context=False)
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(wrapped, indent=1), encoding="utf-8")
+    print(f"context: {wrapped['identity']['context']}  passed: {report.get('passed')}")
+    for check in report.get("checks", []):
+        print(f"{'PASS' if check['pass'] else 'FAIL'}  {check['name']}")
+    print(f"kill_tree: {report.get('kill_tree', {}).get('pass')}")
+    print(f"result (diagnostic only): {out}")
+    return 0 if report.get("passed") else 1
 
 
 def cmd_helper(_args: argparse.Namespace) -> int:
@@ -211,7 +249,14 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("audit-exposure", help="what a UDCS AppContainer can reach on this image")
     p.add_argument("--out", required=True, help="where to write the JSON report")
     p.add_argument("--data-dir", help="scratch/runtime directory (default: per-user)")
+    p.add_argument("--summary-out", help="also write a labelled summary (machine, image, identity)")
     p.set_defaults(func=cmd_audit_exposure)
+    p = sub.add_parser(
+        "isolation-selftest", help="isolation self-test in this process (diagnostic)"
+    )
+    p.add_argument("--out", required=True)
+    p.add_argument("--data-dir", help="scratch/runtime directory (default: per-user)")
+    p.set_defaults(func=cmd_isolation_selftest)
     return parser
 
 
