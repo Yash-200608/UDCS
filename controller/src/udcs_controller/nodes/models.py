@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import BigInteger, Boolean, ForeignKey, Integer, String, Uuid
+from sqlalchemy import BigInteger, Boolean, ForeignKey, Integer, String, Uuid, false
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from udcs_controller.database.base import Base, JSONType, UTCDateTime, str_enum
@@ -24,6 +24,9 @@ class Node(Base):
     # Unique per node. Rotation is two-phase: `pending_credential_hash` becomes the
     # credential on its first successful use, so a lost rotation response can't
     # lock the node out.
+    # Set by an administrator only. A node runs user code only if this is true AND it
+    # reports a verified AppContainer AND it offers user code itself (ADR 0003).
+    user_code_allowed: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
     credential_hash: Mapped[str] = mapped_column(String(64), unique=True)
     pending_credential_hash: Mapped[str | None] = mapped_column(
         String(64), unique=True, nullable=True

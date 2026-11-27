@@ -83,6 +83,7 @@ def test_full_lifecycle_submit_assign_run_succeed_and_fetch_result(
         "total_units": 25,
         "memory_mb": 256,
         "package": None,
+        "limits": None,
     }
     assert _job(client, student_headers, job["id"])["state"] == "assigned"
 

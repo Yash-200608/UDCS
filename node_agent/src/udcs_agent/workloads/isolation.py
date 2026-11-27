@@ -165,6 +165,81 @@ class AppContainerIsolation:
         except OSError as exc:
             raise IsolationUnavailable(f"AppContainer launch failed: {exc}") from exc
 
+    def package_bootstrap(self, root: Path, entry: Path, args: list[str], paths: list[Path]) -> str:
+        """Run a researcher's entry script as __main__ with an explicit import path (the
+        package source and its approved environment only; -I -S already removed every
+        environment- and site-based path). stdout/stderr go to logs/, the only place the
+        agent reads them from; the process has no console and inherits no handles."""
+        return "\n".join(
+            [
+                "import runpy, sys",
+                "sys.stdout = open('logs/stdout.txt', 'a', encoding='utf-8', buffering=1)",
+                "sys.stderr = open('logs/stderr.txt', 'a', encoding='utf-8', buffering=1)",
+                f"sys.path[:0] = {[str(p) for p in paths]!r}",
+                f"sys.argv = [{str(entry)!r}, *{list(args)!r}]",
+                f"runpy.run_path({str(entry)!r}, run_name='__main__')",
+            ]
+        )
+
+    def launch_package(
+        self,
+        workload_id: str,
+        job,
+        root: Path,
+        *,
+        entry: Path,
+        args: list[str],
+        import_paths: list[Path],
+        read_only: tuple[Path, ...],
+        writable: tuple[Path, ...],
+    ):
+        """Start a staged package in this workload's AppContainer, inside `job`.
+
+        Grants, all to this workload's own package SID (and the agent's user, which an
+        AppContainer access check also needs): read/execute on the staging root and the
+        read-only parts (source, environment, inputs, config), modify on `writable`
+        only (out/, state/, logs/, tmp/). The interpreter comes from the shared runtime
+        capability. No network capability is ever added."""
+        from udcs_agent.winplat import appcontainer as ac
+
+        capability = self.ensure_runtime()
+        try:
+            package = ac.ensure_profile(self.profile_name(workload_id))
+            user = ac.current_user_sid()
+            ac.grant(root, package, ac.READ_EXECUTE)
+            ac.grant(root, user, ac.READ_EXECUTE)
+            for path in read_only:
+                ac.grant(path, package, ac.READ_EXECUTE)
+                ac.grant(path, user, ac.READ_EXECUTE)
+            for path in writable:
+                path.mkdir(parents=True, exist_ok=True)
+                ac.grant(path, package, ac.MODIFY)
+                ac.grant(path, user, ac.MODIFY)
+            ac.set_ui_restrictions(job)
+            env = {
+                "SystemRoot": os.environ.get("SystemRoot", r"C:\Windows"),
+                "TEMP": str(root / "tmp"),
+                "TMP": str(root / "tmp"),
+            }
+            argv = [
+                self.python,
+                "-I",
+                "-S",
+                "-B",  # never write .pyc into the read-only source tree
+                "-c",
+                self.package_bootstrap(root, entry, args, import_paths),
+            ]
+            return ac.launch_in_appcontainer(
+                argv,
+                job,
+                ac.SandboxSpec(package, (capability,), lpac=False),
+                cwd=root,
+                env=env,
+                desktop=ac.workload_desktop(capability),
+            )
+        except OSError as exc:
+            raise IsolationUnavailable(f"AppContainer launch failed: {exc}") from exc
+
     def sweep_orphans(self, known_workload_ids: set[str]) -> list[str]:
         """Delete UDCS workload profiles whose workload no longer exists (e.g. the agent
         died before a purge). Returns the names removed."""

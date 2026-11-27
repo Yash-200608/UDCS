@@ -23,7 +23,13 @@ from udcs_controller.config import Settings
 from udcs_controller.database.migrate import upgrade_to_head
 from udcs_controller.main import create_app
 from udcs_shared.agent_api import PROTOCOL_VERSION
-from udcs_shared.hardware import CpuInfo, HardwareInventory, MemoryInfo, OsInfo
+from udcs_shared.hardware import (
+    CpuInfo,
+    HardwareInventory,
+    IsolationCapability,
+    MemoryInfo,
+    OsInfo,
+)
 from udcs_shared.packages import CHUNK_RAW_SIZE_HEADER, CHUNK_SHA256_HEADER
 
 PASSWORD = "correct-horse-battery"
@@ -223,10 +229,10 @@ def project(tmp_path) -> Path:
 
 class SimulatedNode:
     """Takes a package job and reports outputs through the real node API. It executes
-    nothing: it is how `fetch` is tested while execution is disabled. (A test turns the
-    controller flag on in memory for it; no real node offers user code.)"""
+    nothing: it is how the client is tested in-process. It reports a verified
+    AppContainer, and an administrator makes it eligible through the real endpoint."""
 
-    def __init__(self, app: FastAPI) -> None:
+    def __init__(self, app: FastAPI, *, eligible: bool = True) -> None:
         admin = api_client(app, "admin")
         key = admin.post(
             "/admin/enrollment-keys",
@@ -246,6 +252,7 @@ class SimulatedNode:
             memory=MemoryInfo(total_bytes=16 * 2**30),
             network_interfaces=[],
             gpus=[],
+            isolation=[IsolationCapability(name="appcontainer", available=True, verified=True)],
         )
         self.http = TestClient(app, base_url=SERVER + API)
         enrolled = self.http.post(
@@ -258,6 +265,14 @@ class SimulatedNode:
         )
         assert enrolled.status_code == 201, enrolled.text
         self.http.headers["Authorization"] = f"Bearer {enrolled.json()['node_credential']}"
+        self.node_id = enrolled.json()["node_id"]
+        if eligible:
+            made = admin.post(
+                f"/admin/nodes/{self.node_id}/user-code",
+                json={"allowed": True, "reason": "test node"},
+            )
+            assert made.status_code == 200, made.text
+        self.outputs: dict | None = None
 
     def _sync(self, reports: list[dict], *, accept: bool) -> dict:
         body = {
@@ -269,6 +284,8 @@ class SimulatedNode:
                 "kinds": ["cpu"] if accept else [],
                 "memory_available_mb": 4096,
                 "user_code": True,
+                "python": "3.12",
+                "platform": "win_amd64",
             },
         }
         response = self.http.post("/agent/jobs/sync", json=body)
@@ -290,18 +307,29 @@ class SimulatedNode:
         }
         done = self.http.put(f"/agent/jobs/{job_id}/outputs", json=manifest)
         assert done.status_code == 204, done.text
+        self.outputs = manifest
 
-    def complete(self, job_id: str, attempt: int, *, units: int = 1) -> None:
-        # Package jobs still carry the catalog result contract (ADR 0002 open decision).
+    def complete(self, job_id: str, attempt: int, *, units: int | None = None, exit_code: int = 0):
+        """`units` given: a catalog job, reported with its checksum. Otherwise a package
+        job: its exit code and the digest of the outputs it reported (ADR 0003)."""
         from udcs_shared.jobs import expected_checksum
+        from udcs_shared.packages import OutputManifest
 
-        report = {
-            "job_id": job_id,
-            "attempt": attempt,
-            "state": "completed",
-            "units_done": units,
-            "result": {"units": units, "checksum": str(expected_checksum(units))},
-        }
+        report: dict = {"job_id": job_id, "attempt": attempt, "state": "completed"}
+        if units is not None:
+            report["units_done"] = units
+            report["result"] = {"units": units, "checksum": str(expected_checksum(units))}
+        else:
+            files = self.outputs["files"] if self.outputs else []
+            report["units_done"] = 0
+            report["package_result"] = {
+                "exit_code": exit_code,
+                "outputs_sha256": OutputManifest.model_validate(self.outputs).digest()
+                if self.outputs
+                else None,
+                "files": len(files),
+                "bytes": sum(f["size"] for f in files),
+            }
         self._sync([report], accept=False)
 
 

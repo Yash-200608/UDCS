@@ -158,6 +158,41 @@ class ControllerClient:
     def set_credential(self, credential: str) -> None:
         self._credential = credential
 
+    # -- package runs (ADR 0003) ----------------------------------------------------------
+
+    def _authorized(self, method: str, path: str, **kwargs) -> httpx.Response:
+        if not self._credential:
+            raise CredentialRejected("agent has no node credential")
+        headers = dict(kwargs.pop("headers", {}) or {})
+        headers["Authorization"] = f"Bearer {self._credential}"
+        headers["X-Request-ID"] = f"agent-{uuid.uuid4().hex}"
+        try:
+            response = self._http.request(method, path, headers=headers, **kwargs)
+        except httpx.TimeoutException as exc:
+            raise ControllerUnavailable(f"request to controller timed out ({exc})") from exc
+        except httpx.TransportError as exc:
+            raise ControllerUnavailable(f"cannot reach controller ({exc})") from exc
+        self._raise_for_status(response, enrolling=False)
+        return response
+
+    def package_closure(self, job_id: uuid.UUID, attempt: int) -> dict:
+        """The manifests to stage for this assignment (package, environment, datasets)."""
+        response = self._authorized(
+            "GET", f"/agent/jobs/{job_id}/package", params={"attempt": attempt}
+        )
+        try:
+            return response.json()
+        except ValueError as exc:
+            raise ProtocolError("package closure is not JSON") from exc
+
+    def put_outputs(self, job_id: uuid.UUID, manifest: dict) -> None:
+        self._authorized("PUT", f"/agent/jobs/{job_id}/outputs", json=manifest)
+
+    def transfer_http(self) -> NodeHttp:
+        """An httpx-like view for chunked uploads and verified downloads that adds this
+        node's credential to every request (blobs are fenced by job and attempt)."""
+        return NodeHttp(self._http, lambda: self._credential)
+
     # -- internals --------------------------------------------------------
 
     def _send(
@@ -206,3 +241,34 @@ class ControllerClient:
             return model.model_validate_json(response.content)
         except ValidationError as exc:
             raise ProtocolError(f"unexpected response from controller: {exc}") from exc
+
+
+class NodeHttp:
+    """Wraps the agent's httpx client for udcs_shared.transfer_http: the same calls
+    (post/put/get/stream), each carrying the node credential. Transport errors pass
+    through unchanged, so the transfer code's own resume and retry logic applies."""
+
+    def __init__(self, http: httpx.Client, credential) -> None:
+        self._http = http
+        self._credential = credential
+
+    def _headers(self, headers) -> dict:
+        merged = dict(headers or {})
+        secret = self._credential()
+        if not secret:
+            raise CredentialRejected("agent has no node credential")
+        merged["Authorization"] = f"Bearer {secret}"
+        return merged
+
+    def post(self, url, **kwargs):
+        return self._http.post(url, headers=self._headers(kwargs.pop("headers", None)), **kwargs)
+
+    def put(self, url, **kwargs):
+        return self._http.put(url, headers=self._headers(kwargs.pop("headers", None)), **kwargs)
+
+    def get(self, url, **kwargs):
+        return self._http.get(url, headers=self._headers(kwargs.pop("headers", None)), **kwargs)
+
+    def stream(self, method, url, **kwargs):
+        headers = self._headers(kwargs.pop("headers", None))
+        return self._http.stream(method, url, headers=headers, **kwargs)

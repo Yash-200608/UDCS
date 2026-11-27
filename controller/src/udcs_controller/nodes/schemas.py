@@ -75,6 +75,19 @@ class NodeOut(BaseModel):
     inventory: HardwareInventory | None
     inventory_updated_at: datetime | None
     latest_telemetry: TelemetrySnapshot | None
+    user_code_allowed: bool = Field(
+        default=False, description="administrator-set eligibility to run user packages"
+    )
+    user_code_ready: bool = Field(
+        default=False, description="eligible AND reports a verified AppContainer"
+    )
+
+
+class NodeUserCodeUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    allowed: bool
+    reason: str = Field(min_length=3, max_length=200, description="recorded in the audit log")
 
 
 class GpuModelSummary(BaseModel):

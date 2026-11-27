@@ -55,6 +55,10 @@ class Job(Base):
         ForeignKey("packages.digest", ondelete="RESTRICT"), nullable=True, index=True
     )
     output_manifest: Mapped[dict[str, Any] | None] = mapped_column(JSONType, nullable=True)
+    # Package jobs: effective limits (package capped by policy, fixed at submission)
+    # and the process exit code of the attempt that finished it.
+    run_limits: Mapped[dict[str, Any] | None] = mapped_column(JSONType, nullable=True)
+    exit_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class JobLog(Base):

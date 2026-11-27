@@ -1,6 +1,6 @@
 # Development Status
 
-_Last updated: 2026-11-22. Development checkpoint on branch `feature/udcs-background-agent-m15`. This is **not** a release, and Milestone 1.5 is **not accepted**._
+_Last updated: 2026-11-27. Development checkpoint on branch `feature/udcs-background-agent-m15`. This is **not** a release, and Milestone 1.5 is **not accepted**._
 
 ## Summary
 
@@ -12,6 +12,7 @@ _Last updated: 2026-11-22. Development checkpoint on branch `feature/udcs-backgr
 | M2b: Isolation for workloads (D-3) | **Decided: [ADR 0001](docs/decisions/0001-workload-isolation.md). Native AppContainer backend implemented and tested; the catalog runs inside it where a node verifies it.** **Service-path gate passed** (2026-11-22, SYSTEM in session 0). User code is still **disabled**: ADR gate 2 (review of what ALL APPLICATION PACKAGES exposes on a lab image) is open |
 | ADR 0001 gate 3: user-code packaging and delivery | **Implemented, tested and security-reviewed** ([ADR 0002](docs/decisions/0002-user-code-packaging.md)). Manifest, validator, CAS, resumable chunked transfer, node staging and outputs work end to end **without executing anything**. All 11 review findings are fixed and regression-tested. Execution is still disabled by two switches |
 | Researcher submission client (`udcs`) | **Implemented and tested; execution still disabled.** Create or select a project, declare its entry point and dependencies (approved environments only), attach datasets, validate, upload, submit, monitor and fetch verified results. The disabled path is honest: it registers the package, creates no job and exits 3. Review: 27 findings fixed. [Guide](docs/guides/researcher-client.md) |
+| Package execution pipeline ([ADR 0003](docs/decisions/0003-package-execution.md)) | **Implemented and tested end to end on one PC, disabled by default.** Researcher CLI → HTTPS controller → eligibility-checked scheduling → Windows agent → AppContainer + Job Object → chunked upload → verified `udcs fetch` passes for real (`tests/e2e/test_package_execution_e2e.py`). Three switches are off in every shipped default: controller flag, agent constant, per-node admin flag. **Blocked for real use** on M1.5 pass 2, ADR 0001 gate 2 and an operator procedure |
 
 ## Status legend
 
@@ -192,6 +193,40 @@ Design and review: [ADR 0002, "Researcher client"](docs/decisions/0002-user-code
 | Transfer, DPAPI and URL code moved from the agent to `udcs_shared` | tested; agent suite unchanged | `shared/tests/test_dpapi.py` |
 | Package job end to end (real agent executes, outputs fetched) | **not possible yet**: execution disabled | skipped `test_package_job_end_to_end` |
 
+### Package execution pipeline (ADR 0003, 2026-11-27)
+
+Tested on Windows 11 build 26300 (a different PC from the earlier milestones), as the interactive user, not elevated.
+
+**Tested:**
+
+| Component | Evidence |
+|---|---|
+| Package job contract: no units or checksum; `PackageRunLimits`, `PackageResult` (exit code + output digest), `FailureKind`, `staging`/`uploading` states; catalog jobs unchanged | `controller/tests/test_packages.py`, `test_jobs.py` |
+| Scheduling refuses, before the claim: nodes not admin-eligible, without a verified AppContainer, with the wrong Python, or (with an environment) the wrong platform or an unapproved environment | `test_incompatible_nodes_never_receive_package_jobs`, `test_environment_platform_and_approval_are_matched` |
+| Admin eligibility endpoint: `MANAGE_NODES` only, audited with a reason | `test_node_eligibility_is_admin_only_and_audited` |
+| Stale attempts cannot publish (uploads, output report, result); cancel during upload stops publication; a result must name this attempt's outputs | `test_a_stale_attempt_cannot_publish_*`, `test_cancel_during_result_upload_*`, `test_a_result_must_name_*` |
+| Workload failures final, infrastructure failures retried; non-zero exit recorded | `test_workload_failures_are_final_*` |
+| Agent: offer only when enabled AND AppContainer verified; refuse otherwise; substituted manifest, corrupted blob or Python mismatch refused before staging; phases, upload, result digest, cleanup, reassignment, opaque checkpoints up and down | `node_agent/tests/test_package_sync.py` (17) |
+| Real AppContainer runs: outputs, log capture, exit codes and crashes as results; a hostile package denied the node credential, another job's files, the data dir, the user profile, writes to source/config/outside `out/`, and loopback network; a surviving child killed; junction/hard-link planting refused; runtime, storage and memory limits; output limits; reserved log name; import from an approved environment, read-only | `node_agent/tests/test_package_runs_windows.py` (10) |
+| **Full path**, researcher CLI → HTTPS → scheduler → `AgentApp` → AppContainer → upload → `udcs fetch`, plus cancel mid-run with cleanup | `tests/e2e/test_package_execution_e2e.py` (2) |
+| Mutation check: 14 guards removed one at a time, 14 caught | ADR 0003 |
+
+**Bug found by the tests:** the storage limit never fired, because NTFS directory listings report stale sizes for files still being written. Sizes are now read from the files themselves.
+
+**Untested:**
+- packages under the installed service (LocalSystem, session 0);
+- GPU frameworks inside AppContainer;
+- two live agents with node loss for packages (covered at controller and agent level only);
+- PostgreSQL for the new migration (CI will run it).
+
+**Full-suite result on this PC:** 418 passed, 19 skipped, 4 failed. All 4 failures are e2e tests whose agents never left `constrained`: the governor protecting a busy machine.
+- Three are catalog tests in `test_job_pipeline.py`; one is the package cancel test, which passed when run alone.
+- Running two of the catalog tests on the **unmodified previous commit**, in a separate worktree, under the same conditions failed the same way (2 of 2).
+- So they are environmental (local protection working as designed), not a regression. They are the same intermittent tests the M2a review lists.
+- CI runs them on a quiet runner.
+
+**Blocked (by design):** enabling execution anywhere real needs M1.5 pass 2, ADR 0001 gate 2 (lab-image exposure audit) and an operator procedure for the per-node flag. The node's AppContainer claim is self-reported, so the admin flag is the control that counts.
+
 ### M2a engineering review
 
 **Achieved and verified:**
@@ -292,7 +327,7 @@ Not covered by this run:
 |---|---|
 | D-2: native session helper | open |
 | D-3: execution isolation | **decided**: native AppContainer now; MXC for 24H2+ nodes later (ADR 0001) |
-| Enabling user code | **not yet**: needs ADR 0001 gate 2 (lab-image review) and per-node admin eligibility (ADR 0002) |
+| Enabling user code | **not yet**: per-node admin eligibility is now built (ADR 0003); still needs ADR 0001 gate 2 (lab-image review), M1.5 pass 2 and an operator procedure for granting eligibility |
 | D-4: power policy | open |
 | Repository license | none chosen |
 | Differentiator versus HTCondor | needs to be written before M3 |
@@ -323,4 +358,10 @@ Not covered by this run:
   - Catalog jobs can be submitted, watched and verified locally.
   - The adversarial review confirmed 27 findings; all are fixed with regression tests, and 14 of 15 guard mutations are caught.
   - Two latent bugs were fixed: zero-byte blob downloads, and e2e tests writing into `var/`.
+- **2026-11-27, package execution pipeline (ADR 0003).**
+  - Package jobs got their own contract: exit code, output digest, failure class, run limits.
+  - Scheduling now checks administrator eligibility, verified AppContainer, and Python and platform compatibility before the claim.
+  - The agent stages, runs in AppContainer, collects only after an empty Job Object, uploads in chunks and reports. Stale attempts cannot publish.
+  - The full researcher → controller → agent → AppContainer → fetch path passes for real on one PC. Execution stays disabled by default.
+  - Moved to a new PC (build 26300): uv installed from PyPI with approval; the baseline suite passed unchanged there (382 passed, 19 skipped).
 

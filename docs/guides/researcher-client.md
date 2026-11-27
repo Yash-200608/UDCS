@@ -176,6 +176,22 @@ udcs fetch JOB -o results/ --resume
 
 For catalog jobs, `fetch` recomputes the expected checksum locally rather than trusting the server's verdict.
 
+## When execution is enabled
+
+These are the rules once an administrator enables user code ([ADR 0003](../decisions/0003-package-execution.md)).
+
+**Where it runs.** Your package goes only to a lab PC an administrator marked eligible, which has proven it can run sandboxed code and runs your Python version. If you use an environment, the PC must also match its platform.
+
+**How it runs.** Your entry script runs as `__main__`. Its imports come from your source tree and your environment only. There is no network.
+
+**Exit code.** Exit code 0 with outputs is success. Any other exit code is recorded, and the job is **not** retried, since it would fail the same way again. A node problem is retried on another PC.
+
+**Logs.** stdout and stderr are saved under `udcs-logs/` in your results (last 4 MiB of each). The last lines also appear in `udcs logs`. `out/udcs-logs/` is reserved.
+
+**Checkpoints.** To survive a move to another PC, write your own state to `state/checkpoint.bin` (at most 1 MiB). It is restored before your code starts again. A restarted run otherwise begins from scratch, with `out/` empty.
+
+**Limits.** Your runtime (paused time does not count), disk use and outputs are limited by your `[limits]` and the deployment's policy.
+
 ## Exit codes
 
 | Code | Meaning |

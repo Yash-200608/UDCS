@@ -23,6 +23,7 @@ from udcs_controller.nodes.schemas import (
     EnrollmentKeyOut,
     NodeOut,
     NodeStateUpdate,
+    NodeUserCodeUpdate,
     ResourceSummary,
 )
 
@@ -198,6 +199,37 @@ def set_node_state(
         target_type="node",
         target_id=str(node.id),
         details={"from": previous.value, "to": body.admin_state.value},
+    )
+    db.commit()
+    return service.to_out(node, now=now, settings=request.app.state.settings)
+
+
+@router.post("/admin/nodes/{node_id}/user-code", response_model=NodeOut)
+def set_node_user_code(
+    node_id: uuid.UUID,
+    body: NodeUserCodeUpdate,
+    auth: ManageNodes,
+    request: Request,
+    db: DbSession,
+    now: Now,
+) -> NodeOut:
+    """Administrator eligibility for user packages (ADR 0003). It is one of three
+    independent conditions: the controller flag, this flag, and the node's own measured
+    AppContainer. Revoking it stops new package assignments at once; jobs already on
+    the node finish or are cancelled by an administrator."""
+    node = _get_node(db, node_id)
+    previous = node.user_code_allowed
+    node.user_code_allowed = body.allowed
+    record_event(
+        db,
+        request,
+        now=now,
+        actor_type=ActorType.USER,
+        actor_id=auth.user.id,
+        action="node.user_code_changed",
+        target_type="node",
+        target_id=str(node.id),
+        details={"from": previous, "to": body.allowed, "reason": body.reason},
     )
     db.commit()
     return service.to_out(node, now=now, settings=request.app.state.settings)

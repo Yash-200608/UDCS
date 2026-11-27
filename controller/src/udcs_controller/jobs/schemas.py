@@ -13,8 +13,10 @@ class JobCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(default="", max_length=128)
-    kind: WorkloadClass = Field(description="catalog workload; user code is not accepted yet")
-    total_units: int = Field(ge=1, le=MAX_TOTAL_UNITS)
+    kind: WorkloadClass = Field(description="catalog workload, or a package's resource class")
+    total_units: int | None = Field(
+        default=None, ge=1, le=MAX_TOTAL_UNITS, description="catalog jobs only (required there)"
+    )
     memory_mb: int = Field(default=256, ge=16, le=4096)
     priority: int = Field(default=0, ge=0, le=100, description="above 0 requires manage_jobs")
     package: str | None = Field(
@@ -45,6 +47,7 @@ class JobOut(BaseModel):
     cpu_seconds: float
     memory_bytes: int
     error: str | None
+    exit_code: int | None = Field(default=None, description="package jobs: the process exit code")
     node_id: uuid.UUID | None = Field(default=None, description="shown only to manage_jobs")
     package: str | None = Field(default=None, description="user-code package digest, if any")
 

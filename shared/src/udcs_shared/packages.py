@@ -352,6 +352,10 @@ class OutputManifest(_Contract):
     def total_bytes(self) -> int:
         return sum(f.size for f in self.files)
 
+    def digest(self) -> str:
+        """SHA-256 of the canonical JSON: what a package result names (PackageResult)."""
+        return hashlib.sha256(canonical_json(self.model_dump(mode="json"))).hexdigest()
+
 
 # -- transfer contracts ------------------------------------------------------------------------
 

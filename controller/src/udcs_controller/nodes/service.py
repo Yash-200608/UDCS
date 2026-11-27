@@ -294,6 +294,8 @@ def to_out(node: Node, *, now: datetime, settings: Settings) -> NodeOut:
         else None,
         inventory_updated_at=node.inventory.updated_at if node.inventory else None,
         latest_telemetry=_parse_or_none(TelemetrySnapshot, node.latest_telemetry),
+        user_code_allowed=node.user_code_allowed,
+        user_code_ready=node.user_code_allowed and _verified_appcontainer(node),
     )
 
 
@@ -346,3 +348,9 @@ def resource_summary(db: Session, *, now: datetime, settings: Settings) -> Resou
             for (n, m, c), k in sorted(models.items(), key=lambda item: (-item[1], item[0][0]))
         ],
     )
+
+
+def _verified_appcontainer(node: Node) -> bool:
+    from udcs_controller.jobs.service import node_verified_appcontainer
+
+    return node_verified_appcontainer(node)

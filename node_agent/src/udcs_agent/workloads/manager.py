@@ -28,6 +28,9 @@ from udcs_shared.protection import LevelEnvelope, ProtectionPolicy, WorkloadClas
 logger = logging.getLogger(__name__)
 
 RESTART_BACKOFF_SECONDS = 30.0
+STORAGE_CHECK_SECONDS = 5.0  # package runs: how often their writable area is measured
+TREE_EXIT_WAIT_SECONDS = 10.0  # after the main process exits, until the job is empty
+STORAGE_SCAN_MAX_ENTRIES = 200_000
 GPU_PAUSE_ACK_SECONDS = 2.0  # then threads are suspended too
 EVICT_AFTER_PAUSED_SECONDS = 600.0  # a long pause still holds RAM/VRAM; give it back
 MAX_FAILURES = 3
@@ -54,6 +57,14 @@ class WorkloadSpec:
     # "host" (Job Object only; built-in catalog code) or "appcontainer" (required: the
     # workload never starts without it). See workloads/isolation.py.
     isolation: str = "host"
+    # Package runs (ADR 0003): a staged researcher package instead of a catalog workload.
+    package_root: str = ""
+    entry: str = ""
+    args: list[str] = field(default_factory=list)
+    import_paths: list[str] = field(default_factory=list)
+    read_only: list[str] = field(default_factory=list)
+    max_runtime_seconds: int = 0  # running time, excluding pauses; 0 = none
+    storage_bytes: int = 0  # out/, state/, logs/ and tmp/ together; 0 = none
 
     def __post_init__(self) -> None:
         self.kind = WorkloadClass(self.kind)
@@ -61,6 +72,16 @@ class WorkloadSpec:
             raise ValueError("workload id must be alphanumeric/hyphen, <= 64 chars")
         if self.isolation not in ("host", "appcontainer"):
             raise ValueError(f"unknown isolation level {self.isolation!r}")
+        if self.package_root and self.isolation != "appcontainer":
+            raise ValueError("a package run requires appcontainer isolation")
+
+    @property
+    def is_package(self) -> bool:
+        return bool(self.package_root)
+
+    def writable(self) -> tuple[Path, ...]:
+        root = Path(self.package_root)
+        return (root / "out", root / "state", root / "logs", root / "tmp")
 
 
 @dataclass(frozen=True)
@@ -85,6 +106,9 @@ class _Running:
     coop_sent_at: float = 0.0
     checkpoint_deadline: float | None = None
     evict_reason: str = ""
+    active_seconds: float = 0.0  # time actually running (not paused), for runtime limits
+    last_tick: float | None = None
+    next_storage_check: float = 0.0
 
 
 @dataclass
@@ -97,6 +121,9 @@ class _Record:
     last_exit_code: int | None = None
     cpu_seconds: float = 0.0  # cumulative over every process this workload has had
     history: list[str] = field(default_factory=list)
+    # How a package run ended: exited | runtime_limit | storage_limit | start_failed |
+    # isolation_unavailable | tree_survived. Empty while it has not ended.
+    outcome: str = ""
 
 
 class WorkloadManager:
@@ -162,6 +189,8 @@ class WorkloadManager:
                 failures=item.get("failures", 0),
                 evictions=item.get("evictions", 0),
                 cpu_seconds=float(item.get("cpu_seconds", 0.0)),
+                last_exit_code=item.get("last_exit_code"),
+                outcome=str(item.get("outcome", "")),
             )
 
     def _save_registry(self) -> None:
@@ -173,6 +202,8 @@ class WorkloadManager:
                     "failures": r.failures,
                     "evictions": r.evictions,
                     "cpu_seconds": round(r.cpu_seconds, 3),
+                    "last_exit_code": r.last_exit_code,
+                    "outcome": r.outcome,
                 }
                 for r in self._records.values()
             ]
@@ -298,6 +329,7 @@ class WorkloadManager:
                     "state": record.state.value,
                     "failures": record.failures,
                     "last_exit_code": record.last_exit_code,
+                    "outcome": record.outcome,
                     "cpu_seconds": cpu,
                     "memory_bytes": memory,
                     "events": [(t, what) for t, w, what in self.events if w == wid],
@@ -395,6 +427,8 @@ class WorkloadManager:
                 elif record.state not in (WorkloadState.EVICTED,):
                     self._set(record, WorkloadState.WAITING)
                 continue
+            if record.spec.is_package and self._package_limits(record, running, now):
+                continue  # killed for exceeding a limit
             if running.state == WorkloadState.CHECKPOINTING:
                 if running.checkpoint_deadline is not None and now >= running.checkpoint_deadline:
                     self._event(now, record.spec.id, "checkpoint_deadline_kill")
@@ -485,6 +519,9 @@ class WorkloadManager:
                 if "memory_pressure" in assessment.reasons:
                     # Freeze: no new allocations beyond what the job already holds.
                     running.job.set_memory_limit(max(self._private_of(running), 64 * 2**20))
+                elif running.spec.is_package:
+                    limit = min(memory_share, max(running.spec.memory_mb, 64) * 2**20)
+                    running.job.set_memory_limit(max(limit, 64 * 2**20))
                 else:
                     running.job.set_memory_limit(max(memory_share, 64 * 2**20))
             except OSError:
@@ -497,7 +534,135 @@ class WorkloadManager:
 
     # -- actions ---------------------------------------------------------------------------------
 
+    # -- package runs (ADR 0003) -----------------------------------------------------------
+
+    def _package_limits(self, record: _Record, running: _Running, now: float) -> bool:
+        """Enforce a package run's runtime and storage limits. True if it was killed."""
+        if running.last_tick is not None and running.state in (
+            WorkloadState.RUNNING,
+            WorkloadState.THROTTLED,
+        ):
+            running.active_seconds += max(0.0, now - running.last_tick)
+        running.last_tick = now
+        spec = record.spec
+        if spec.max_runtime_seconds and running.active_seconds > spec.max_runtime_seconds:
+            self._end_package(record, running, now, "runtime_limit")
+            return True
+        if spec.storage_bytes and now >= running.next_storage_check:
+            running.next_storage_check = now + STORAGE_CHECK_SECONDS
+            used = self._storage_used(spec)
+            if used is None or used > spec.storage_bytes:
+                self._end_package(record, running, now, "storage_limit")
+                return True
+        return False
+
+    @staticmethod
+    def _storage_used(spec: WorkloadSpec) -> int | None:
+        """Bytes in the run's writable area, never following links. None if the tree is
+        too large to even count (itself a limit breach)."""
+        total = entries = 0
+        stack = [p for p in spec.writable() if p.is_dir()]
+        while stack:
+            try:
+                with os.scandir(stack.pop()) as listing:
+                    for entry in listing:
+                        entries += 1
+                        if entries > STORAGE_SCAN_MAX_ENTRIES:
+                            return None
+                        if entry.is_dir(follow_symlinks=False):
+                            stack.append(Path(entry.path))
+                        elif entry.is_file(follow_symlinks=False):
+                            # Not entry.stat(): NTFS directory entries report a stale
+                            # size for files still open for writing (measured). os.stat
+                            # opens the file and asks it.
+                            total += os.stat(entry.path, follow_symlinks=False).st_size
+            except OSError:
+                continue
+        return total
+
+    def _end_package(self, record: _Record, running: _Running, now: float, outcome: str) -> None:
+        """A package run has ended (exit or limit): kill whatever is left of its process
+        tree and wait until the job is empty, so nothing can still write its outputs when
+        they are collected. Only then is the run marked finished."""
+        gone = self._terminate_tree(running)
+        self._terminate(running)
+        self._running.pop(record.spec.id, None)
+        record.outcome = outcome if gone else "tree_survived"
+        if record.outcome == "exited":
+            self._set(record, WorkloadState.COMPLETED)
+        else:
+            self._set(record, WorkloadState.FAILED)
+        self._event(now, record.spec.id, f"package_{record.outcome}:{record.last_exit_code}")
+
+    @staticmethod
+    def _terminate_tree(running: _Running) -> bool:
+        try:
+            running.job.terminate(1)
+        except OSError:
+            pass
+        deadline = time.monotonic() + TREE_EXIT_WAIT_SECONDS
+        while time.monotonic() < deadline:
+            try:
+                if not running.job.process_ids():
+                    return True
+            except OSError:
+                return False
+            time.sleep(0.05)
+        return False
+
+    def _start_package(self, record: _Record, now: float) -> None:
+        from udcs_agent.packages import remove_staging
+        from udcs_agent.winplat.jobs import JobObject
+
+        spec = record.spec
+        root = Path(spec.package_root)
+        if self._isolation is None:
+            self._set(record, WorkloadState.FAILED)
+            record.outcome = "isolation_unavailable"
+            self._event(now, spec.id, "isolation_unavailable: appcontainer")
+            return
+        # Every run starts with empty outputs and logs (an evicted run restarts from the
+        # beginning); state/ is kept: it is where a package keeps its own checkpoint.
+        for name in ("out", "logs", "tmp"):
+            remove_staging(root / name)
+            (root / name).mkdir(parents=True, exist_ok=True)
+        workdir = self.root / spec.id
+        workdir.mkdir(parents=True, exist_ok=True)
+        job = JobObject()
+        job.set_cpu_cap(5)  # start gently; the next tick applies the real envelope
+        job.set_memory_limit(max(spec.memory_mb, 64) * 2**20)
+        from udcs_agent.workloads.isolation import IsolationUnavailable
+
+        try:
+            process = self._isolation.launch_package(
+                spec.id,
+                job,
+                root,
+                entry=root / "src" / Path(*spec.entry.split("/")),
+                args=list(spec.args),
+                import_paths=[Path(p) for p in spec.import_paths],
+                read_only=tuple(Path(p) for p in spec.read_only),
+                writable=spec.writable(),
+            )
+        except (IsolationUnavailable, OSError) as exc:
+            job.close()
+            record.failures += 1
+            record.restart_after = now + self._backoff
+            self._event(now, spec.id, f"start_failed: {str(exc)[:120]}")
+            if record.failures >= MAX_FAILURES:
+                record.outcome = "start_failed"
+                self._set(record, WorkloadState.FAILED)
+            else:
+                self._set(record, WorkloadState.WAITING)
+            return
+        self._running[spec.id] = _Running(spec, workdir, job, process, last_tick=now)
+        self._set(record, WorkloadState.RUNNING)
+        self._event(now, spec.id, "started (package, appcontainer)")
+
     def _start(self, record: _Record, now: float) -> None:
+        if record.spec.is_package:
+            self._start_package(record, now)
+            return
         from udcs_agent.winplat.jobs import JobObject
         from udcs_agent.winplat.launch import launch_in_job
 
@@ -636,6 +801,11 @@ class WorkloadManager:
                 continue
             record = self._records[wid]
             record.last_exit_code = code
+            if record.spec.is_package and running.state != WorkloadState.CHECKPOINTING:
+                # Any exit is a finished run: the exit code is the package's result,
+                # not a reason to restart it. Children are killed before it counts.
+                self._end_package(record, running, now, "exited")
+                continue
             state = self.status_of(wid).get("state")
             if running.state == WorkloadState.CHECKPOINTING:
                 self._finish_eviction(record, running, now, killed=code != EXIT_CHECKPOINTED)

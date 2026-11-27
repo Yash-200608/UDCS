@@ -19,6 +19,7 @@ from udcs_shared.hardware import (
     CpuInfo,
     GpuInfo,
     HardwareInventory,
+    IsolationCapability,
     MemoryInfo,
     NetworkInterfaceInfo,
     OsInfo,
@@ -117,8 +118,15 @@ def inventory_factory() -> Callable[..., HardwareInventory]:
         hostname: str = "lab-b-07",
         gpus: tuple[tuple[str, int, str], ...] = (("NVIDIA GeForce RTX 3060", 12 * 2**30, "8.6"),),
         memory_gib: int = 32,
+        appcontainer: bool = False,
     ) -> HardwareInventory:
+        isolation = (
+            [IsolationCapability(name="appcontainer", available=True, verified=True)]
+            if appcontainer
+            else []
+        )
         return HardwareInventory(
+            isolation=isolation,
             agent_version="0.1.0",
             os=OsInfo(system="Windows", release="11", version="10.0.22631", hostname=hostname),
             cpu=CpuInfo(

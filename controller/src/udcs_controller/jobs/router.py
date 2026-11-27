@@ -17,7 +17,7 @@ from udcs_controller.database.session import DbSession
 from udcs_controller.jobs import service
 from udcs_controller.jobs.models import Job, JobLog
 from udcs_controller.jobs.schemas import JobCreate, JobLogOut, JobOut, JobResultOut
-from udcs_shared.jobs import JobResult, JobSpec, JobState
+from udcs_shared.jobs import JobResult, JobSpec, JobState, PackageRunLimits
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
@@ -69,12 +69,33 @@ def to_out(job: Job, *, show_node: bool) -> JobOut:
         error=job.error,
         node_id=job.node_id if show_node else None,
         package=job.package_digest,
+        exit_code=job.exit_code,
+    )
+
+
+def _run_limits(request: Request, db, digest: str) -> PackageRunLimits:
+    """The package's own limits, capped by the deployment policy, fixed at submission."""
+    from udcs_controller.packages.models import Package
+    from udcs_shared.packages import PackageManifest
+
+    policy = request.app.state.settings.package_policy
+    manifest = PackageManifest.model_validate(db.get(Package, digest).manifest)
+    return PackageRunLimits(
+        max_runtime_seconds=min(manifest.limits.max_runtime_seconds, policy.max_runtime_seconds),
+        max_output_bytes=min(manifest.limits.max_output_bytes, policy.max_output_bytes),
+        max_output_files=min(manifest.limits.max_output_files, policy.max_output_files),
+        max_output_entries=policy.max_output_entries,
+        max_output_depth=policy.max_output_depth,
     )
 
 
 def _package_for(body: JobCreate, auth: AuthContext, request: Request, db) -> str | None:
     """User code is refused outright while the feature flag is off (ADR 0001 gates)."""
     if body.package is None:
+        if body.total_units is None:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY, detail="catalog jobs need total_units"
+            )
         return None
     if not request.app.state.settings.user_code_enabled:
         raise HTTPException(
@@ -92,17 +113,19 @@ def _package_for(body: JobCreate, auth: AuthContext, request: Request, db) -> st
 def submit(body: JobCreate, auth: SubmitJobs, request: Request, db: DbSession, now: Now) -> JobOut:
     if body.priority > 0 and not _manager(auth):
         raise HTTPException(status.HTTP_403_FORBIDDEN, detail="priority requires manage_jobs")
+    digest = _package_for(body, auth, request, db)
     try:
         job = service.submit_job(
             db,
             owner=auth.user,
             spec=JobSpec(
                 kind=body.kind,
-                total_units=body.total_units,
+                total_units=1 if digest else body.total_units,  # packages have no units
                 memory_mb=body.memory_mb,
-                package=body.package,
+                package=digest,
             ),
-            package_digest=_package_for(body, auth, request, db),
+            package_digest=digest,
+            run_limits=_run_limits(request, db, digest) if digest else None,
             name=body.name,
             priority=body.priority,
             now=now,

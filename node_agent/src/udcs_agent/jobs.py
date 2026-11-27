@@ -23,6 +23,8 @@ import hashlib
 import json
 import logging
 import os
+import sys
+import sysconfig
 import time
 import uuid
 from collections.abc import Callable
@@ -31,8 +33,10 @@ from typing import Any, Protocol
 
 from pydantic import ValidationError
 
+from udcs_agent import package_runs
 from udcs_agent.communication.client import ControllerUnavailable, ProtocolError
 from udcs_agent.governor.engine import AdmissionView
+from udcs_agent.packages import NodeCache
 from udcs_agent.workloads.manager import WorkloadManager, WorkloadSpec
 from udcs_shared.agent_api import PROTOCOL_VERSION
 from udcs_shared.jobs import (
@@ -42,12 +46,15 @@ from udcs_shared.jobs import (
     AgentJobReport,
     CheckpointDownload,
     CheckpointUpload,
+    FailureKind,
     JobLogLine,
     JobResult,
     JobSyncRequest,
     JobSyncResponse,
     LocalJobState,
     NodeJobCapacity,
+    PackageResult,
+    PackageRunLimits,
     validate_catalog_checkpoint,
 )
 from udcs_shared.protection import ProtectionLevel, WorkloadClass
@@ -57,7 +64,17 @@ logger = logging.getLogger(__name__)
 WORKLOAD_PREFIX = "job-"
 # User code stays off on every node until ADR 0001's remaining gates pass. It is a
 # constant, not configuration, so it cannot be switched on by a config file on a lab PC.
+# Even when it is on, a node runs packages only with a verified AppContainer, and the
+# controller sends them only to nodes an administrator made eligible (ADR 0003).
 USER_CODE_ENABLED = False
+NODE_PYTHON = f"{sys.version_info.major}.{sys.version_info.minor}"  # what packages run on
+NODE_PLATFORM = sysconfig.get_platform().replace("-", "_").replace(".", "_")
+
+
+def user_code_offered(isolation: str) -> bool:
+    return USER_CODE_ENABLED and isolation == "appcontainer"
+
+
 READD_AFTER_SECONDS = 10.0
 _NO_NEW_WORK_LEVELS = {
     ProtectionLevel.CONSTRAINED,
@@ -110,6 +127,8 @@ class JobSync:
         self._pending_cursor: dict[str, float] = {}
         self._last_offer = ""
         self._refused: dict[str, int] = {}  # user-code assignments refused, until acknowledged
+        self._stale_staging: set[str] = set()
+        self._staging_removal_due: set[str] = set()
 
     # -- persistence ---------------------------------------------------------------------------
 
@@ -172,7 +191,16 @@ class JobSync:
             return refuse("no workload class allowed")
         if slots == 0:
             return refuse("all job slots in use")
-        return NodeJobCapacity(accept=True, slots=slots, kinds=kinds, memory_available_mb=memory_mb)
+        offered = user_code_offered(self._isolation)
+        return NodeJobCapacity(
+            accept=True,
+            slots=slots,
+            kinds=kinds,
+            memory_available_mb=memory_mb,
+            user_code=offered,
+            python=NODE_PYTHON if offered else None,
+            platform=NODE_PLATFORM if offered else None,
+        )
 
     def build_request(self) -> JobSyncRequest:
         snapshot = self._snapshot(WORKLOAD_PREFIX)
@@ -186,6 +214,9 @@ class JobSync:
         for job_id, entry in self._assignments.items():
             wid = workload_id(uuid.UUID(job_id))
             item = snapshot.get(wid)
+            if entry.get("package"):
+                reports.append(self._package_report(job_id, entry, item, now))
+                continue
             if item is None:
                 waiting_for_checkpoint = "resume" in entry
                 if (
@@ -216,7 +247,10 @@ class JobSync:
                     attempt=attempt,
                     state=LocalJobState.FAILED,
                     units_done=0,
-                    error="user code execution is disabled on this node",
+                    error=(
+                        "user code is not offered by this node "
+                        "(disabled, or no verified AppContainer)"
+                    ),
                 )
             )
         return JobSyncRequest(protocol_version=PROTOCOL_VERSION, reports=reports, capacity=capacity)
@@ -263,6 +297,48 @@ class JobSync:
             ][-MAX_LOG_LINES_PER_REPORT:],
         )
 
+    def _package_report(
+        self, job_id: str, entry: dict[str, Any], item: dict[str, Any] | None, now: float
+    ) -> AgentJobReport:
+        phase = entry.get("phase", "staging")
+        base: dict[str, Any] = {
+            "job_id": uuid.UUID(job_id),
+            "attempt": int(entry["attempt"]),
+            "units_done": 0,
+            "logs": self._note_lines(job_id),
+        }
+        if item is not None:
+            base["cpu_seconds"] = float(item.get("cpu_seconds", 0.0))
+            base["memory_bytes"] = int(item.get("memory_bytes", 0))
+        if phase == "failed":
+            result = entry.get("result")
+            return AgentJobReport(
+                **base,
+                state=LocalJobState.FAILED,
+                failure=FailureKind(entry.get("failure", "infrastructure")),
+                error=str(entry.get("error", "package run failed"))[:300],
+                package_result=PackageResult.model_validate(result) if result else None,
+            )
+        if phase == "done":
+            return AgentJobReport(
+                **base,
+                state=LocalJobState.COMPLETED,
+                package_result=PackageResult.model_validate(entry["result"]),
+            )
+        if phase == "staging":
+            return AgentJobReport(**base, state=LocalJobState.STAGING)
+        if item is None:  # ready, but the workload is gone (lost add request): re-add
+            if self._wall() - float(entry.get("added_at", 0)) > READD_AFTER_SECONDS:
+                self._queue_add(job_id, entry)
+            return AgentJobReport(**base, state=LocalJobState.WAITING)
+        state = LocalJobState(str(item["state"]))
+        if state in (LocalJobState.COMPLETED, LocalJobState.FAILED):
+            state = LocalJobState.UPLOADING  # finished locally; outputs not yet uploaded
+        report = self._report(job_id, entry, item, now)
+        return report.model_copy(
+            update={"state": state, "units_done": 0, "result": None, "error": None}
+        )
+
     def _note(self, job_id: str, message: str) -> None:
         self._notes.setdefault(job_id, []).append(message[:200])
         del self._notes[job_id][:-10]
@@ -292,17 +368,34 @@ class JobSync:
             WorkloadManager.queue_request(
                 self.data_dir, "remove", workload_id=workload_id(job_id), purge=True
             )
+            self._stale_staging.add(key)  # deleted once the workload is gone (next sync)
             why = "cancelled by controller" if job_id in response.cancel else "done"
             logger.info("job %s %s", key, why)
         for assignment in response.assignments:
             key = str(assignment.job_id)
-            if assignment.spec.package is not None and not USER_CODE_ENABLED:
-                # Defence in depth: this node never offers user code, so the controller
+            if assignment.spec.package is not None and not user_code_offered(self._isolation):
+                # Defence in depth: this node does not offer user code, so the controller
                 # should never send it. If it does, refuse and run nothing.
                 self._refused[key] = assignment.attempt
-                logger.error("refused user-code job %s: user code is disabled", key)
+                logger.error("refused user-code job %s: user code is not offered here", key)
                 continue
             entry = self._assignments.get(key)
+            if entry is not None and entry.get("package"):
+                if int(entry["attempt"]) < assignment.attempt:
+                    # Re-assigned after a lease loss: outputs are bound to the attempt, so
+                    # the run starts again from staging (its checkpoint, if any, is kept
+                    # centrally and restored).
+                    WorkloadManager.queue_request(
+                        self.data_dir,
+                        "remove",
+                        workload_id=workload_id(assignment.job_id),
+                        purge=True,
+                    )
+                    self._stale_staging.add(key)
+                    entry = None
+                    del self._assignments[key]
+                else:
+                    continue
             if entry is not None:
                 if int(entry["attempt"]) < assignment.attempt:
                     # Re-assigned to us after a lease loss: keep the local progress.
@@ -315,6 +408,16 @@ class JobSync:
                 "added_at": self._wall(),
                 "isolation": self._isolation,
             }
+            if assignment.spec.package is not None:
+                entry["package"] = assignment.spec.package
+                entry["phase"] = "staging"  # nothing runs until every byte verified
+                if assignment.checkpoint is not None:
+                    entry["resume"] = assignment.checkpoint.model_dump(mode="json")
+                self._assignments[key] = entry
+                self._save()
+                self._stale_staging.discard(key)
+                logger.info("package job %s accepted (attempt %s)", key, assignment.attempt)
+                continue
             if assignment.checkpoint is not None:
                 # Resume elsewhere-made progress: fetch and verify before the workload exists.
                 entry["resume"] = assignment.checkpoint.model_dump(mode="json")
@@ -328,6 +431,30 @@ class JobSync:
 
     def _queue_add(self, job_id: str, entry: dict[str, Any]) -> None:
         spec = entry["spec"]
+        if entry.get("package"):
+            run = entry["run"]
+            limits = PackageRunLimits.model_validate(spec["limits"])
+            WorkloadManager.queue_request(
+                self.data_dir,
+                "add",
+                spec=WorkloadSpec(
+                    id=workload_id(uuid.UUID(job_id)),
+                    kind=spec["kind"],
+                    total_units=1,
+                    memory_mb=int(spec["memory_mb"]),
+                    checkpointable=False,  # evicted runs are killed and restarted
+                    isolation="appcontainer",  # never anything weaker for user code
+                    package_root=run["root"],
+                    entry=run["entry"],
+                    args=list(run["args"]),
+                    import_paths=list(run["import_paths"]),
+                    read_only=list(run["read_only"]),
+                    max_runtime_seconds=limits.max_runtime_seconds,
+                    storage_bytes=package_runs.storage_budget(limits),
+                ),
+            )
+            entry["added_at"] = self._wall()
+            return
         WorkloadManager.queue_request(
             self.data_dir,
             "add",
@@ -344,9 +471,144 @@ class JobSync:
     def sync_once(self, controller: JobController) -> JobSyncResponse:
         response = controller.sync_jobs(self.build_request())
         self.apply(response)
+        self.clean_staging()
         self.resume_pending(controller)
+        self.prepare_packages(controller)
+        self.finish_packages(controller)
         self.upload_checkpoints(controller)
         return response
+
+    # -- package runs (ADR 0003) ---------------------------------------------------------------
+
+    def clean_staging(self) -> None:
+        """Staging trees of jobs that are no longer ours. Deferred one sync after the
+        workload's removal is queued, so the process tree is gone first."""
+        for job_id in list(self._stale_staging):
+            if job_id in self._assignments:
+                self._stale_staging.discard(job_id)
+                continue
+            if job_id in self._staging_removal_due:
+                package_runs.remove_runs(self.data_dir, job_id)
+                self._staging_removal_due.discard(job_id)
+                self._stale_staging.discard(job_id)
+            else:
+                self._staging_removal_due.add(job_id)
+
+    def _fail_package(
+        self, job_id: str, entry: dict[str, Any], error: str, kind: FailureKind
+    ) -> None:
+        entry["phase"] = "failed"
+        entry["error"] = error[:300]
+        entry["failure"] = kind.value
+        self._save()
+        self._note(job_id, error)
+
+    def prepare_packages(self, controller) -> None:
+        """Fetch, verify and stage packages that were accepted. A transient problem
+        leaves the job staging (retried next sync); anything else fails the attempt."""
+        if not hasattr(controller, "package_closure"):
+            return
+        if not any(
+            e.get("package") and e.get("phase") == "staging" for e in self._assignments.values()
+        ):
+            return  # catalog-only syncs do no package work at all
+        cache = NodeCache(self.data_dir)
+        for job_id, entry in list(self._assignments.items()):
+            if not entry.get("package") or entry.get("phase") != "staging":
+                continue
+            try:
+                run = package_runs.prepare(
+                    controller,
+                    self.data_dir,
+                    cache,
+                    uuid.UUID(job_id),
+                    int(entry["attempt"]),
+                    entry["package"],
+                    python=NODE_PYTHON,
+                    platform=NODE_PLATFORM,
+                )
+            except package_runs.RetryLater as exc:
+                logger.info("package job %s: staging delayed: %s", job_id, exc)
+                continue
+            except package_runs.RunFailed as exc:
+                self._fail_package(job_id, entry, str(exc), exc.kind)
+                continue
+            if "resume" in entry:
+                self._restore_package_checkpoint(controller, job_id, entry, run.root)
+            entry["run"] = {
+                "root": str(run.root),
+                "entry": run.entry,
+                "args": run.args,
+                "import_paths": run.import_paths,
+                "read_only": run.read_only,
+            }
+            entry["phase"] = "ready"
+            self._save()
+            self._queue_add(job_id, entry)
+            self._note(job_id, "package verified and staged")
+
+    def _restore_package_checkpoint(self, controller, job_id: str, entry, root: Path) -> None:
+        ref = entry.pop("resume")
+        try:
+            download = controller.get_checkpoint(uuid.UUID(job_id), int(entry["attempt"]))
+            payload = base64.b64decode(download.payload_b64, validate=True)
+        except (ControllerUnavailable, ProtocolError, binascii.Error, ValueError) as exc:
+            self._note(job_id, f"package checkpoint unavailable ({str(exc)[:80]}); starting fresh")
+            return
+        digest = hashlib.sha256(payload).hexdigest()
+        if (
+            digest != download.sha256
+            or digest != ref["sha256"]
+            or download.version != ref["version"]
+        ):
+            self._note(job_id, "package checkpoint failed verification; starting fresh")
+            return
+        package_runs.install_checkpoint(root, payload)
+        entry["ckpt_sha"] = digest
+        self._note(job_id, f"restored package checkpoint v{ref['version']} into state/")
+
+    def finish_packages(self, controller) -> None:
+        """After a run's process tree is gone: collect, upload and record the result."""
+        if not hasattr(controller, "put_outputs"):
+            return
+        snapshot = self._snapshot(WORKLOAD_PREFIX)
+        for job_id, entry in list(self._assignments.items()):
+            if not entry.get("package") or entry.get("phase") != "ready":
+                continue
+            item = snapshot.get(workload_id(uuid.UUID(job_id)))
+            if item is None or item.get("state") not in ("completed", "failed"):
+                continue
+            root = Path(entry["run"]["root"])
+            limits = PackageRunLimits.model_validate(entry["spec"]["limits"])
+            for line in package_runs.log_tail(root):
+                self._note(job_id, line)
+            outcome = str(item.get("outcome") or "")
+            exit_code = item.get("last_exit_code")
+            if item["state"] == "failed":
+                if outcome == "runtime_limit":
+                    message = f"runtime limit exceeded ({limits.max_runtime_seconds} s)"
+                    self._fail_package(job_id, entry, message, FailureKind.WORKLOAD)
+                elif outcome == "storage_limit":
+                    message = "storage limit exceeded (out/, state/, logs/, tmp/)"
+                    self._fail_package(job_id, entry, message, FailureKind.WORKLOAD)
+                else:
+                    message = f"package could not run on this node ({outcome or 'failed'})"
+                    self._fail_package(job_id, entry, message, FailureKind.INFRASTRUCTURE)
+                continue
+            try:
+                result = package_runs.finish(
+                    controller, uuid.UUID(job_id), root, int(entry["attempt"]), limits, exit_code
+                )
+            except package_runs.RetryLater as exc:
+                logger.info("package job %s: upload delayed: %s", job_id, exc)
+                continue
+            except package_runs.RunFailed as exc:
+                self._fail_package(job_id, entry, str(exc), exc.kind)
+                continue
+            entry["phase"] = "done"
+            entry["result"] = result.model_dump(mode="json")
+            self._save()
+            self._note(job_id, f"exited with code {exit_code}; {result.files} outputs uploaded")
 
     # -- central checkpoints -------------------------------------------------------------------
 
@@ -359,8 +621,8 @@ class JobSync:
         verification is never used: the job then starts from zero, and its log says why."""
         for job_id, entry in list(self._assignments.items()):
             ref = entry.get("resume")
-            if ref is None:
-                continue
+            if ref is None or entry.get("package"):
+                continue  # package checkpoints are restored after staging
             problem: str | None
             try:
                 download = controller.get_checkpoint(uuid.UUID(job_id), int(entry["attempt"]))
@@ -422,6 +684,11 @@ class JobSync:
                 continue
             if now - self._last_upload.get(job_id, float("-inf")) < self._upload_every:
                 continue
+            if entry.get("package"):
+                if self._upload_package_checkpoint(controller, job_id, entry) is False:
+                    return
+                self._last_upload[job_id] = now
+                continue
             try:
                 payload = (self._workdir(job_id) / "checkpoint.json").read_bytes()
                 units = int(json.loads(payload)["units_done"])
@@ -446,3 +713,42 @@ class JobSync:
                 continue
             self._uploaded_units[job_id] = units
             self._last_upload[job_id] = now
+
+    def _upload_package_checkpoint(self, controller, job_id: str, entry) -> bool | None:
+        """A package's own state/checkpoint.bin (opaque, at most 1 MiB), uploaded when its
+        content changes. False if the controller is unreachable."""
+        if entry.get("phase") != "ready" or "run" not in entry:
+            return None
+        path = package_runs.checkpoint_path(Path(entry["run"]["root"]))
+        try:
+            if (
+                path.is_symlink()
+                or not path.is_file()
+                or path.stat().st_size > MAX_CHECKPOINT_BYTES
+            ):
+                return None
+            payload = path.read_bytes()
+        except OSError:
+            return None
+        if not payload or len(payload) > MAX_CHECKPOINT_BYTES:
+            return None
+        digest = hashlib.sha256(payload).hexdigest()
+        if digest == entry.get("ckpt_sha"):
+            return None
+        version = int(entry.get("ckpt_version", 0)) + 1
+        upload = CheckpointUpload(
+            attempt=int(entry["attempt"]),
+            version=version,
+            units_done=0,
+            sha256=digest,
+            payload_b64=base64.b64encode(payload).decode("ascii"),
+        )
+        try:
+            controller.put_checkpoint(uuid.UUID(job_id), upload)
+        except ControllerUnavailable:
+            return False
+        except ProtocolError as exc:
+            logger.warning("package checkpoint for job %s rejected: %s", job_id, exc)
+        entry["ckpt_sha"], entry["ckpt_version"] = digest, version
+        self._save()
+        return None

@@ -1,9 +1,13 @@
 """Job contracts shared by the controller, the scheduler and the node agent.
 
-Execution model (Milestone 2, catalog phase):
-- Only workloads from the built-in catalog run (the cpu / memory / disk / gpu
-  synthetic workloads). No user-supplied code is accepted until an isolation model
-  is approved (decision D-3).
+Two kinds of job share this contract:
+- catalog jobs: the built-in cpu / memory / disk / gpu synthetic workloads, measured
+  in work units and verified by a closed-form checksum;
+- package jobs (ADR 0002/0003): a researcher's registered package, run in AppContainer.
+  They have no units and no checksum. Their result is the process exit code and an
+  output manifest whose files were uploaded, hash-verified, by the executing attempt.
+  User-code execution is disabled by default (controller flag, agent constant, and an
+  administrator-set per-node eligibility flag).
 - The agent *pulls* work. It asks for jobs only when its local protection envelope
   allows that workload class, and the governor can still throttle, pause or evict
   any job afterwards. The controller never pushes work past local protection.
@@ -48,6 +52,8 @@ TERMINAL_JOB_STATES = frozenset({JobState.SUCCEEDED, JobState.FAILED, JobState.C
 class LocalJobState(StrEnum):
     """What the agent's workload manager says. The governor decides these, not the controller."""
 
+    STAGING = "staging"  # package jobs: fetching and verifying the package before it runs
+    UPLOADING = "uploading"  # package jobs: process tree gone, outputs being uploaded
     WAITING = "waiting"
     RUNNING = "running"
     THROTTLED = "throttled"
@@ -58,8 +64,27 @@ class LocalJobState(StrEnum):
     FAILED = "failed"
 
 
+class FailureKind(StrEnum):
+    """Who a failure belongs to, which decides whether it is retried."""
+
+    INFRASTRUCTURE = "infrastructure"  # node, staging, isolation, transfer: retried elsewhere
+    WORKLOAD = "workload"  # the package itself (exit code, limits): final, never retried
+
+
+class PackageRunLimits(_Contract):
+    """Effective limits for one package run: the package's own, capped by the
+    controller's policy. The node enforces them; the controller re-checks outputs."""
+
+    max_runtime_seconds: int = Field(ge=1, le=7 * 86_400)
+    max_output_bytes: int = Field(ge=0)
+    max_output_files: int = Field(ge=0)
+    max_output_entries: int = Field(ge=1)
+    max_output_depth: int = Field(ge=1)
+
+
 class JobSpec(_Contract):
-    """A catalog workload. Fields are bounded, so no spec can describe unbounded work."""
+    """A catalog workload or a package run. Fields are bounded, so no spec can describe
+    unbounded work. For package jobs `total_units` is 1 and carries no meaning."""
 
     kind: WorkloadClass
     total_units: int = Field(ge=1, le=MAX_TOTAL_UNITS, description="units of ~50 ms of work")
@@ -69,6 +94,7 @@ class JobSpec(_Contract):
         pattern=r"^[0-9a-f]{64}$",
         description="user-code package digest (ADR 0002); `kind` is then its resource class",
     )
+    limits: PackageRunLimits | None = Field(default=None, description="package jobs only")
 
 
 class JobResult(_Contract):
@@ -86,6 +112,18 @@ def expected_checksum(units: int) -> int:
     return (n - 1) * n * (2 * n - 1) // 6 if n > 0 else 0
 
 
+class PackageResult(_Contract):
+    """How a package run ended, reported once its whole process tree has exited and
+    its outputs are uploaded. `outputs_sha256` names the exact output manifest the node
+    reported for this attempt, so a report cannot point at another attempt's outputs."""
+
+    exit_code: int | None = Field(ge=-(2**31), le=2**32 - 1, description="None: killed by UDCS")
+    outputs_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    files: int = Field(default=0, ge=0)
+    bytes: int = Field(default=0, ge=0)
+    reason: str = Field(default="", max_length=200, description="e.g. runtime limit exceeded")
+
+
 class JobLogLine(_Contract):
     age_seconds: float = Field(ge=0, le=86_400, description="how long ago, on the agent's clock")
     message: str = Field(min_length=1, max_length=200)
@@ -99,6 +137,8 @@ class AgentJobReport(_Contract):
     cpu_seconds: float = Field(default=0, ge=0)
     memory_bytes: int = Field(default=0, ge=0)
     result: JobResult | None = None
+    package_result: PackageResult | None = None
+    failure: FailureKind = FailureKind.INFRASTRUCTURE
     error: str | None = Field(default=None, max_length=300)
     logs: list[JobLogLine] = Field(default_factory=list, max_length=MAX_LOG_LINES_PER_REPORT)
 
@@ -113,6 +153,12 @@ class NodeJobCapacity(_Contract):
     reason: str = Field(default="", max_length=64, description="why nothing is accepted")
     user_code: bool = Field(
         default=False, description="the node accepts user-code packages (off until ADR gates pass)"
+    )
+    python: str | None = Field(
+        default=None, pattern=r"^3\.[0-9]{1,2}$", description="interpreter packages would run on"
+    )
+    platform: str | None = Field(
+        default=None, pattern=r"^[a-z0-9_]{1,32}$", description="e.g. win_amd64"
     )
 
 

@@ -253,7 +253,7 @@ All 27 are fixed with regression tests (`client/tests/test_client_review_regress
 - The e2e controller fixture wrote blobs into the repository's `var/`.
 
 **Open decisions and limits:**
-- **Package jobs still carry the catalog contract.** `total_units` must be set (the client sends 1), and a completion needs a catalog checksum. Defining a user-code result contract belongs to the execution milestone.
+- ~~Package jobs still carry the catalog contract.~~ **Resolved by [ADR 0003](0003-package-execution.md):** package jobs have their own contract (exit code, output digest, failure class, run limits).
 - **The package-job end-to-end path is untested.** Nothing executes yet. A skipped test, `test_package_job_end_to_end`, keeps it visible.
 - **Many small files remain slow** (about 13 files/s); the client warns above 1,000 files.
 - **The secret heuristic is not exhaustive.** The allowlist is the control.

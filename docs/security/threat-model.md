@@ -88,5 +88,18 @@ User code execution is **disabled**. These threats concern delivery and staging,
 | T38 | Hash as a capability: learning or reading another user's file by knowing its digest | Transfer is skipped only for blobs the caller owns; downloads and package references need ownership; nodes may read only their current attempt's closure | [implemented, tested] |
 | T39 | A node grants the job owner someone else's blob through an output manifest | An output must have been uploaded in full by that node for that attempt; one manifest per attempt; the same error for missing and foreign blobs | [implemented, tested] (review finding F1, high) |
 | T40 | A node fills the controller's storage | Per-attempt output budget at session start; uploads only for the current, active attempt; dead sessions swept | [implemented, tested]; unreferenced-blob GC not built |
-| T41 | User code reaches nodes while it is meant to be off | Two independent switches: a controller flag checked at dispatch and on node endpoints, and an agent constant that refuses package assignments | [implemented, tested]; per-node admin eligibility not built (needed before enabling) |
+| T41 | User code reaches nodes while it is meant to be off | Three independent switches: a controller flag (dispatch and node endpoints), an agent constant (offer and refusal), and a per-node administrator flag checked before the claim | [implemented, tested] |
 | T42 | Registering someone's content first locks them out | Package ownership is per user (`package_owners`) | [implemented, tested] |
+
+## Package execution additions (ADR 0003)
+
+| # | Threat | Mitigation | Status |
+|---|---|---|---|
+| T43 | A malicious package reads the node credential, other jobs, the data directory or the user profile | Per-run AppContainer profile; grants only on its own staging tree; no ALL APPLICATION PACKAGES access to UDCS or profile directories | [implemented, tested] on this PC as the interactive user; lab images need ADR 0001 gate 2 |
+| T44 | A package reaches the network | No network capability; loopback connect denied | [implemented, tested] |
+| T45 | A package leaves a process running to tamper with outputs or the node | Main exit kills the whole Job Object; outputs collected only once it is empty; `tree_survived` fails the run | [implemented, tested] |
+| T46 | A package exhausts runtime, disk or memory | Runtime limit (excluding pauses), storage budget measured by opening files, Job Object memory limit, output limits at collection | [implemented, tested] |
+| T47 | Incompatible or unapproved dependencies run on a node | Controller matches Python, platform and environment approval before the claim; the node re-checks Python and platform and refuses substituted manifests | [implemented, tested] |
+| T48 | A stale or cancelled attempt publishes results | Uploads, output report and result fenced to the current active attempt; the result must name this attempt's output digest | [implemented, tested] |
+| T49 | A node lies about AppContainer support to receive packages | Admin per-node eligibility is required as well; node attestation is not built | **open** (mitigated by the admin flag) |
+

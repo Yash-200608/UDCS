@@ -371,9 +371,23 @@ def _sync(client, headers, *, user_code=False):
                 "kinds": ["cpu"],
                 "memory_available_mb": 4096,
                 "user_code": user_code,
+                "python": "3.12" if user_code else None,
+                "platform": "win_amd64" if user_code else None,
             },
         },
     ).json()
+
+
+def _eligible(app, enroll, inventory_factory, hostname, *, allowed=True, appcontainer=True):
+    """Enroll a node that may receive package jobs: verified AppContainer reported in its
+    inventory, and the administrator's per-node flag set (ADR 0003)."""
+    from udcs_controller.nodes.models import Node
+
+    body, headers, _ = enroll(inventory_factory(hostname=hostname, appcontainer=appcontainer))
+    with app.state.sessionmaker() as db:
+        db.get(Node, uuid.UUID(body["node_id"])).user_code_allowed = allowed
+        db.commit()
+    return body, headers, None
 
 
 def _package_job(app, client, headers, digest):
@@ -393,8 +407,8 @@ def test_end_to_end_package_pipeline_without_execution(
     to drive the pipeline."""
     digest, main = uploaded_package
     job = _package_job(app, client, student_headers, digest)
-    _, node, _ = enroll(inventory_factory(hostname="pkg-node"))
-    _, other, _ = enroll(inventory_factory(hostname="other-node"))
+    _, node, _ = _eligible(app, enroll, inventory_factory, "pkg-node")
+    _, other, _ = _eligible(app, enroll, inventory_factory, "other-node")
     assert _sync(client, node, user_code=False)["assignments"] == []  # only to offering nodes
     [assignment] = _sync(client, node, user_code=True)["assignments"]
     assert assignment["spec"]["package"] == digest
@@ -468,7 +482,7 @@ def test_output_limits_and_missing_blobs_are_enforced(
 ):
     digest, _ = uploaded_package
     job = _package_job(app, client, student_headers, digest)
-    _, node, _ = enroll(inventory_factory(hostname="lim-node"))
+    _, node, _ = _eligible(app, enroll, inventory_factory, "lim-node")
     [assignment] = _sync(client, node, user_code=True)["assignments"]
     url = f"{API}/agent/jobs/{job['id']}/outputs"
     never = {
@@ -576,7 +590,7 @@ def _node_put_blob(client, node, job_id, attempt, data):
 
 def _assigned(app, client, student_headers, enroll, inventory_factory, digest, host):
     job = _package_job(app, client, student_headers, digest)
-    _, node, _ = enroll(inventory_factory(hostname=host))
+    _, node, _ = _eligible(app, enroll, inventory_factory, host)
     [assignment] = _sync(client, node, user_code=True)["assignments"]
     return job, node, assignment["attempt"]
 
@@ -757,7 +771,7 @@ def test_kill_switch_stops_dispatch_and_node_endpoints(
     digest, main = uploaded_package
     job = _package_job(app, client, student_headers, digest)  # submitted while on
     app.state.settings = app.state.settings.model_copy(update={"user_code_enabled": False})
-    _, node, _ = enroll(inventory_factory(hostname="ks-node"))
+    _, node, _ = _eligible(app, enroll, inventory_factory, "ks-node")
     assert _sync(client, node, user_code=True)["assignments"] == []
     closure = client.get(
         f"{API}/agent/jobs/{job['id']}/package", headers=node, params={"attempt": 1}
@@ -873,3 +887,371 @@ def test_output_manifest_rejects_a_file_directory_clash():
                 ],
             }
         )
+
+
+# -- package execution (ADR 0003): contract, eligibility, fencing, failure classes -----------
+
+
+def _report(job_id, attempt, state, **fields):
+    return {"job_id": job_id, "attempt": attempt, "state": state, "units_done": 0, **fields}
+
+
+def _sync_reports(client, node, reports, *, user_code=False):
+    body = {
+        "protocol_version": PROTOCOL_VERSION,
+        "reports": reports,
+        "capacity": {
+            "accept": user_code,
+            "slots": 1 if user_code else 0,
+            "kinds": ["cpu"] if user_code else [],
+            "memory_available_mb": 4096,
+            "user_code": user_code,
+            "python": "3.12" if user_code else None,
+            "platform": "win_amd64" if user_code else None,
+        },
+    }
+    response = client.post(f"{API}/agent/jobs/sync", headers=node, json=body)
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def _publish(client, node, job_id, attempt, files: dict[str, bytes]):
+    for data in files.values():
+        start = client.post(
+            f"{API}/agent/blobs/uploads",
+            headers=node,
+            json={"sha256": sha(data), "size": len(data), "job_id": job_id, "attempt": attempt},
+        )
+        assert start.status_code == 200, start.text
+        uid = start.json()["upload_id"]
+        if uid and data:
+            put = client.put(
+                f"{API}/agent/blobs/uploads/{uid}",
+                params={"offset": 0},
+                content=data,
+                headers={
+                    **node,
+                    CHUNK_SHA256_HEADER: sha(data),
+                    CHUNK_RAW_SIZE_HEADER: str(len(data)),
+                },
+            )
+            assert put.status_code == 200, put.text
+        if uid:
+            assert (
+                client.post(f"{API}/agent/blobs/uploads/{uid}/complete", headers=node).status_code
+                == 200
+            )
+    manifest = {
+        "attempt": attempt,
+        "files": [{"path": p, "sha256": sha(d), "size": len(d)} for p, d in sorted(files.items())],
+    }
+    done = client.put(f"{API}/agent/jobs/{job_id}/outputs", headers=node, json=manifest)
+    assert done.status_code == 204, done.text
+    from udcs_shared.packages import OutputManifest
+
+    return OutputManifest.model_validate(manifest).digest()
+
+
+def _result(exit_code, digest=None, files=0):
+    return {"exit_code": exit_code, "outputs_sha256": digest, "files": files, "bytes": 0}
+
+
+def test_package_jobs_carry_run_limits_not_catalog_units(
+    app, client, student_headers, uploaded_package
+):
+    digest, _ = uploaded_package
+    job = _package_job(app, client, student_headers, digest)
+    assert job["total_units"] == 1 and job["exit_code"] is None
+    with app.state.sessionmaker() as db:
+        from udcs_controller.jobs.models import Job
+
+        limits = db.get(Job, uuid.UUID(job["id"])).run_limits
+    policy = app.state.settings.package_policy
+    assert limits["max_runtime_seconds"] == min(3600, policy.max_runtime_seconds)
+    assert limits["max_output_entries"] == policy.max_output_entries
+    catalog = client.post(f"{API}/jobs", headers=student_headers, json={"kind": "cpu"})
+    assert catalog.status_code == 422  # catalog jobs still need units
+
+
+@pytest.mark.parametrize(
+    ("allowed", "appcontainer", "python", "why"),
+    [
+        (False, True, "3.12", "not eligible"),
+        (True, False, "3.12", "no verified AppContainer"),
+        (True, True, "3.11", "Python mismatch"),
+    ],
+)
+def test_incompatible_nodes_never_receive_package_jobs(
+    app,
+    client,
+    student_headers,
+    enroll,
+    inventory_factory,
+    uploaded_package,
+    allowed,
+    appcontainer,
+    python,
+    why,
+):
+    digest, _ = uploaded_package
+    _package_job(app, client, student_headers, digest)
+    _, node, _ = _eligible(
+        app,
+        enroll,
+        inventory_factory,
+        f"n-{python}-{allowed}-{appcontainer}",
+        allowed=allowed,
+        appcontainer=appcontainer,
+    )
+    body = _sync_reports(client, node, [], user_code=True)
+    if python != "3.12":
+        body = client.post(
+            f"{API}/agent/jobs/sync",
+            headers=node,
+            json={
+                "protocol_version": PROTOCOL_VERSION,
+                "reports": [],
+                "capacity": {
+                    "accept": True,
+                    "slots": 1,
+                    "kinds": ["cpu"],
+                    "memory_available_mb": 4096,
+                    "user_code": True,
+                    "python": python,
+                    "platform": "win_amd64",
+                },
+            },
+        ).json()
+    assert body["assignments"] == [], why
+    _, good, _ = _eligible(app, enroll, inventory_factory, f"good-{why[:5]}")
+    assert len(_sync_reports(client, good, [], user_code=True)["assignments"]) == 1  # still queued
+
+
+def test_environment_platform_and_approval_are_matched(
+    app, client, student_headers, admin_headers, enroll, inventory_factory
+):
+    site = b"# numpy stand-in\n"
+    _upload(client, admin_headers, site)
+    env = {
+        "schema_version": 1,
+        "kind": "environment",
+        "name": "sci",
+        "version": "1",
+        "python": "3.12",
+        "lock": [{"name": "numpy", "version": "1.26.4"}],
+        "platform": "linux_x86_64",
+        "files": [{"path": "site/numpy.py", "sha256": sha(site), "size": len(site)}],
+    }
+    env_digest = client.post(f"{API}/packages", headers=admin_headers, json=env).json()["digest"]
+    assert (
+        client.post(f"{API}/admin/packages/{env_digest}/approve", headers=admin_headers).status_code
+        == 200
+    )
+    main = b"import numpy\n"
+    _upload(client, student_headers, main)
+    body = _manifest(
+        files=[{"path": "main.py", "sha256": sha(main), "size": len(main)}],
+        environment=env_digest,
+        requirements=[{"name": "numpy", "version": "1.26.4"}],
+    )
+    digest = client.post(f"{API}/packages", headers=student_headers, json=body).json()["digest"]
+    _package_job(app, client, student_headers, digest)
+    _, node, _ = _eligible(app, enroll, inventory_factory, "win-node")
+    assert _sync_reports(client, node, [], user_code=True)["assignments"] == []  # wrong platform
+
+
+def test_a_stale_attempt_cannot_publish_outputs_or_results(
+    app, client, student_headers, enroll, inventory_factory, uploaded_package
+):
+    digest, _ = uploaded_package
+    job = _package_job(app, client, student_headers, digest)
+    _, old, _ = _eligible(app, enroll, inventory_factory, "old-node")
+    [first] = _sync_reports(client, old, [], user_code=True)["assignments"]
+    # The node vanishes: its lease is reaped and the job goes to another node.
+    with app.state.sessionmaker() as db:
+        from udcs_controller.jobs.models import Job
+        from udcs_shared.jobs import JobState
+
+        row = db.get(Job, uuid.UUID(job["id"]))
+        row.state, row.node_id, row.lease_expires_at = JobState.QUEUED, None, None
+        db.commit()
+    _, new, _ = _eligible(app, enroll, inventory_factory, "new-node")
+    [second] = _sync_reports(client, new, [], user_code=True)["assignments"]
+    assert second["attempt"] == first["attempt"] + 1
+    # The old attempt comes back and tries to publish.
+    stale = client.post(
+        f"{API}/agent/blobs/uploads",
+        headers=old,
+        json={
+            "sha256": sha(b"forged"),
+            "size": 6,
+            "job_id": job["id"],
+            "attempt": first["attempt"],
+        },
+    )
+    assert stale.status_code == 409
+    forged = {"attempt": first["attempt"], "files": []}
+    assert (
+        client.put(f"{API}/agent/jobs/{job['id']}/outputs", headers=old, json=forged).status_code
+        == 409
+    )
+    response = _sync_reports(
+        client, old, [_report(job["id"], first["attempt"], "completed", package_result=_result(0))]
+    )
+    assert job["id"] in response["cancel"]
+    assert (
+        client.get(f"{API}/jobs/{job['id']}", headers=student_headers).json()["state"] == "assigned"
+    )
+    # The current attempt finishes normally.
+    out = _publish(client, new, job["id"], second["attempt"], {"r.txt": b"real"})
+    _sync_reports(
+        client,
+        new,
+        [_report(job["id"], second["attempt"], "completed", package_result=_result(0, out, 1))],
+    )
+    final = client.get(f"{API}/jobs/{job['id']}", headers=student_headers).json()
+    assert final["state"] == "succeeded" and final["exit_code"] == 0
+
+
+def test_a_result_must_name_the_outputs_this_attempt_reported(
+    app, client, student_headers, enroll, inventory_factory, uploaded_package
+):
+    digest, _ = uploaded_package
+    job = _package_job(app, client, student_headers, digest)
+    _, node, _ = _eligible(app, enroll, inventory_factory, "named-node")
+    [a] = _sync_reports(client, node, [], user_code=True)["assignments"]
+    _publish(client, node, job["id"], a["attempt"], {"r.txt": b"real"})
+    lie = _result(0, "f" * 64, 1)
+    _sync_reports(client, node, [_report(job["id"], a["attempt"], "completed", package_result=lie)])
+    after = client.get(f"{API}/jobs/{job['id']}", headers=student_headers).json()
+    assert after["state"] == "queued" and "different outputs" in after["error"]  # retried
+
+
+def test_workload_failures_are_final_and_infrastructure_failures_retry(
+    app, client, student_headers, enroll, inventory_factory, uploaded_package
+):
+    digest, _ = uploaded_package
+    job = _package_job(app, client, student_headers, digest)
+    _, node, _ = _eligible(app, enroll, inventory_factory, "fail-node")
+    [a] = _sync_reports(client, node, [], user_code=True)["assignments"]
+    _sync_reports(
+        client,
+        node,
+        [
+            _report(
+                job["id"], a["attempt"], "failed", failure="infrastructure", error="staging failed"
+            )
+        ],
+    )
+    assert (
+        client.get(f"{API}/jobs/{job['id']}", headers=student_headers).json()["state"] == "queued"
+    )
+    [b] = _sync_reports(client, node, [], user_code=True)["assignments"]
+    _sync_reports(
+        client,
+        node,
+        [
+            _report(
+                job["id"],
+                b["attempt"],
+                "failed",
+                failure="workload",
+                error="runtime limit exceeded (3600 s)",
+            )
+        ],
+    )
+    final = client.get(f"{API}/jobs/{job['id']}", headers=student_headers).json()
+    assert final["state"] == "failed" and "runtime limit" in final["error"]
+
+    job2 = _package_job(app, client, student_headers, digest)
+    [c] = _sync_reports(client, node, [], user_code=True)["assignments"]
+    _sync_reports(
+        client, node, [_report(job2["id"], c["attempt"], "completed", package_result=_result(7))]
+    )
+    done = client.get(f"{API}/jobs/{job2['id']}", headers=student_headers).json()
+    assert done["state"] == "failed" and done["exit_code"] == 7 and done["failures"] == 0
+
+
+def test_cancel_during_result_upload_stops_publication(
+    app, client, student_headers, enroll, inventory_factory, uploaded_package
+):
+    digest, _ = uploaded_package
+    job = _package_job(app, client, student_headers, digest)
+    _, node, _ = _eligible(app, enroll, inventory_factory, "cancel-node")
+    [a] = _sync_reports(client, node, [], user_code=True)["assignments"]
+    start = client.post(
+        f"{API}/agent/blobs/uploads",
+        headers=node,
+        json={"sha256": sha(b"partial"), "size": 7, "job_id": job["id"], "attempt": a["attempt"]},
+    )
+    uid = start.json()["upload_id"]
+    assert client.post(f"{API}/jobs/{job['id']}/cancel", headers=student_headers).status_code == 200
+    put = client.put(
+        f"{API}/agent/blobs/uploads/{uid}",
+        params={"offset": 0},
+        content=b"partial",
+        headers={**node, CHUNK_SHA256_HEADER: sha(b"partial"), CHUNK_RAW_SIZE_HEADER: "7"},
+    )
+    assert put.status_code == 409
+    forged = {"attempt": a["attempt"], "files": []}
+    assert (
+        client.put(f"{API}/agent/jobs/{job['id']}/outputs", headers=node, json=forged).status_code
+        == 409
+    )
+    response = _sync_reports(client, node, [_report(job["id"], a["attempt"], "uploading")])
+    assert job["id"] in response["cancel"]
+
+
+def test_node_eligibility_is_admin_only_and_audited(
+    app, client, student_headers, admin_headers, enroll, inventory_factory
+):
+    body, _, _ = enroll(inventory_factory(hostname="audit-node", appcontainer=True))
+    url = f"{API}/admin/nodes/{body['node_id']}/user-code"
+    payload = {"allowed": True, "reason": "lab image reviewed"}
+    assert client.post(url, headers=student_headers, json=payload).status_code == 403
+    made = client.post(url, headers=admin_headers, json=payload)
+    assert (
+        made.status_code == 200
+        and made.json()["user_code_allowed"]
+        and made.json()["user_code_ready"]
+    )
+    events = client.get(
+        f"{API}/admin/audit-events",
+        headers=admin_headers,
+        params={"action": "node.user_code_changed"},
+    )
+    assert events.status_code == 200 and "lab image reviewed" in events.text
+
+
+def test_package_checkpoints_are_opaque_and_restored_on_reassignment(
+    app, client, student_headers, enroll, inventory_factory, uploaded_package
+):
+    import base64
+    import hashlib
+
+    digest, _ = uploaded_package
+    job = _package_job(app, client, student_headers, digest)
+    _, node, _ = _eligible(app, enroll, inventory_factory, "ckpt-node")
+    [a] = _sync_reports(client, node, [], user_code=True)["assignments"]
+    payload = b"\x00opaque package state\xff"
+    upload = {
+        "attempt": a["attempt"],
+        "version": 1,
+        "units_done": 0,
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "payload_b64": base64.b64encode(payload).decode(),
+    }
+    url = f"{API}/agent/jobs/{job['id']}/checkpoint"
+    assert client.put(url, headers=node, json=upload).status_code == 204
+    claims_units = dict(upload, version=2, units_done=5)
+    assert client.put(url, headers=node, json=claims_units).status_code == 422
+    with app.state.sessionmaker() as db:
+        from udcs_controller.jobs.models import Job
+        from udcs_shared.jobs import JobState
+
+        row = db.get(Job, uuid.UUID(job["id"]))
+        row.state, row.node_id = JobState.QUEUED, None
+        db.commit()
+    _, other, _ = _eligible(app, enroll, inventory_factory, "ckpt-node-2")
+    [b] = _sync_reports(client, other, [], user_code=True)["assignments"]
+    assert b["checkpoint"]["sha256"] == upload["sha256"]

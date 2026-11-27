@@ -530,6 +530,8 @@ def cmd_dataset_push(ctx: Ctx) -> int:
 def _job_line(job: dict) -> str:
     if job.get("package"):
         progress = f"attempt {job['attempt']}, {job['cpu_seconds']:.0f} CPU s"  # no fake percentage
+        if job.get("exit_code") is not None:
+            progress += f", exit code {job['exit_code']}"
     else:
         progress = f"{job['progress'] * 100:.0f}% ({job['units_done']}/{job['total_units']} units)"
     local = f" [{job['local_state']}]" if job.get("local_state") else ""
