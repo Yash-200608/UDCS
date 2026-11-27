@@ -155,8 +155,25 @@ if (-not $AfterReboot) {
 }
 
 # -- pass 2: after reboot -------------------------------------------------------------------
+# Read-only: pass 2 installs, stops or reconfigures nothing. It records results only when
+# it is on the pass-1 machine and that machine has rebooted since, so running it early
+# (or elsewhere) can never overwrite the report with a misleading FAIL.
+if (-not $report.reboot_marker) {
+    Write-Host 'No pass-1 record (reboot_marker) in the report: run pass 1 on this PC first.' -ForegroundColor Yellow
+    exit 2
+}
+$build = [Environment]::OSVersion.Version.ToString()
+$gpus = @(Get-CimInstance Win32_VideoController | ForEach-Object { "$($_.Name) ($($_.DriverVersion))" })
+if ($report.machine -and ($report.machine.build -ne $build -or (Compare-Object @($report.machine.gpu) $gpus))) {
+    Write-Host ("This is not the pass-1 machine (recorded build {0}, this build {1}); nothing recorded." -f $report.machine.build, $build) -ForegroundColor Yellow
+    exit 2
+}
 $boot = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime
 $rebooted = $report.reboot_marker -and ([datetime]$report.reboot_marker.boot_before -lt $boot)
+if (-not $rebooted) {
+    Write-Host 'This PC has not rebooted since pass 1; reboot, sign in, then run -AfterReboot again. Nothing recorded.' -ForegroundColor Yellow
+    exit 2
+}
 $svc = Get-Service $Service
 $svcPid = Get-ServicePid
 $started = (Get-Process -Id $svcPid).StartTime

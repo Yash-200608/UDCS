@@ -227,6 +227,68 @@ Tested on Windows 11 build 26300 (a different PC from the earlier milestones), a
 
 **Blocked (by design):** enabling execution anywhere real needs M1.5 pass 2, ADR 0001 gate 2 (lab-image exposure audit) and an operator procedure for the per-node flag. The node's AppContainer claim is self-reported, so the admin flag is the control that counts.
 
+### Acceptance readiness (2026-11-27)
+
+**1. Audit of ADR 0003 against the code.** Six findings, all fixed with tests:
+
+| # | Finding | Fix | Evidence |
+|---|---|---|---|
+| A1 | Revoking eligibility, losing the AppContainer capability or switching the controller flag off did not stop package jobs already assigned; the node could keep downloading and uploading | One rule, `user_code_unfit()`, applied by the scheduler, the sync (requeue + cancel) and every node package endpoint (409) | `test_revocation_and_reimaging_stop_running_package_jobs`, `test_switching_the_controller_flag_off_stops_running_package_jobs` |
+| A2 | A previous attempt's output manifest survived a requeue, so a later attempt with no outputs appeared to have them | Outputs and exit code are cleared on requeue | `test_a_requeue_clears_the_previous_attempts_outputs` |
+| A3 | Reimaging a node kept its eligibility | Eligibility is bound to the audited OS image; a different image in the inventory suspends it (audited, actor `system`) | the revocation test above |
+| A4 | Eligibility could be granted without evidence, to a node that is not ACTIVE or has no verified AppContainer | A grant needs ACTIVE, a verified AppContainer, and a passing, recent, SYSTEM-context exposure audit of the current image; refusals are audited | `test_node_eligibility_follows_the_operator_procedure`, `test_grant_needs_*` |
+| A5 | A future-dated audit report would pass the age check forever | Reports more than 10 minutes in the future are refused | same test |
+| A6 | **Measured:** a sandbox launched by an agent running as the interactive user can stop that user's 11 per-user services and open the student's `WinSta0\Default` desktop | The agent offers user code only when it runs as LocalSystem | `test_an_interactive_agent_never_offers_user_code` |
+
+**Mutation check:** removed 15 of the new guards one at a time; all 15 were caught, after three weak tests were strengthened (image match and ACTIVE on grant, and a stale image grant at run time).
+
+**Also verified:**
+- cancellation kills a package's child processes, not just its main process (`test_cancelling_a_run_kills_its_whole_process_tree`);
+- the earlier tests for stale attempts, output ownership and credential isolation still pass.
+
+**2. AppContainer exposure audit.** Implemented:
+- the probe, `diagnostics/exposure_probe.py`, runs inside a real UDCS AppContainer;
+- the host side, `diagnostics/exposure_audit.py`, builds its plan;
+- the shared verdict is `udcs_shared/exposure.py`, which the controller re-applies;
+- the command is `udcs-agent audit-exposure`.
+
+What it records: filesystem (list and add-file rights), registry (read, set-value and create-subkey rights), every process (six access rights), every named pipe, global named objects, every listening TCP port plus external endpoints and DNS, every service (five rights), the window station and desktop, the clipboard, and the token. It modifies nothing; write access is tested by opening a handle with the right.
+
+The probe's first runs on this PC found three false positives in the probe itself, all fixed:
+- predefined registry roots return their handle without an access check;
+- the sandbox's own `conhost.exe` looked like a controllable foreign process;
+- `HKLM\SAM` is world-readable by design; the secrets are in `SAM\SAM`.
+
+**Measured on this development PC** (Windows 11 build 26300, as the interactive standard user, *not* a lab image and *not* the service context); summary in `docs/acceptance/data/m3-exposure-audit-devpc-user-context.json`:
+- reachable: 118 directories listable, 6,221 registry keys readable, 10 named pipes connectable, 8 global objects openable, 34 services startable, 40 services queryable;
+- none of these: filesystem or registry write, sensitive data readable, process control, network.
+- **12 violations, all caused by the interactive context:** stop rights on 11 per-user services, and the student's desktop (hence A6).
+
+**3. Operator procedure.** [docs/operations/node-eligibility.md](docs/operations/node-eligibility.md).
+- It is enforced by the controller (migration 0007: `node_exposure_audits`, and the eligibility bound to an image and audit).
+- It is operated with `udcs admin nodes | audit-upload | audits | user-code allow|revoke`.
+- Tested end to end against the real controller (`client/tests/test_client_admin.py`).
+
+**4. Original-machine acceptance, prepared, not run:**
+
+| Script | What it does | Status |
+|---|---|---|
+| `tools/acceptance/m3_preflight.ps1` | Read-only readiness check: same machine as pass 1 (build and GPU), rebooted since, service present and LocalSystem, installed agent version, repository environment, OneDrive online-only files | run here: correctly reports this is *not* the pass-1 machine and no service is installed |
+| `tools/acceptance/m15_service_acceptance.ps1 -AfterReboot` | M1.5 pass 2 | now refuses to record anything unless it is on the pass-1 machine and that machine rebooted since; still read-only |
+| `tools/acceptance/m2_isolation_service_acceptance.ps1` | Service-path isolation self-test (unchanged) | ready |
+| `tools/acceptance/m3_exposure_audit.ps1 -AsSystem` | The exposure audit as LocalSystem, through a temporary scheduled task, using the repository's code (the installed service is not upgraded, stopped or reconfigured) | user context run here; **the `-AsSystem` path is untested** (this session is not elevated) |
+
+**Outstanding acceptance requirements (none can be claimed yet):**
+- M1.5 pass 2 (start after reboot) on the original machine: **not run**.
+- Exposure audit as SYSTEM on the original machine, then on each real lab image: **not run**. No lab image has been validated.
+- A reviewed decision on each lab image's reachable items (pipes, objects, services): **not done**.
+- Packages executed by the installed service: **not done**. It runs older code; upgrading it is a separate, explicit step.
+
+**Unverified assumptions:**
+- Under SYSTEM, the per-user-service and desktop violations disappear. This is expected from token membership and the private window station, but not measured.
+- The audit's roots and depths are enough to find an image's exposures. They are bounded: Users depth 4, ProgramData 3, others 1–2. A deeper exposure can be missed, so review the coverage numbers.
+- The OS release and build are a sufficient image key; software and patch changes need a manual re-audit.
+
 ### M2a engineering review
 
 **Achieved and verified:**

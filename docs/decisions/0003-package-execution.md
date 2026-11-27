@@ -97,7 +97,14 @@ Phases of an assignment:
 
 These are single runs on one machine, not benchmarks.
 
-## 6. Not done (honest)
+## 6. Acceptance-readiness changes (2026-11-27)
+
+- **A fourth condition:** the agent offers user code only when it runs as **LocalSystem**. The exposure audit measured that an interactive agent's sandbox can stop the student's per-user services and open their desktop.
+- **Eligibility** now needs a passing, SYSTEM-context exposure audit of the node's current image (operator procedure: `docs/operations/node-eligibility.md`). It is bound to that image and is suspended automatically when the image changes.
+- **Revocation, a lost capability or the controller flag switched off** stop package jobs already running (requeued, cancelled on the node), and every node package endpoint refuses.
+- **A requeue clears** the previous attempt's outputs and exit code.
+
+## 7. Not done (honest)
 
 - **Real-fleet enablement.** Blocked as above. Nothing here has run as the installed service (LocalSystem, session 0) with user code; the service-path isolation gate (ADR 0001 gate 1) covered the catalog only.
 - **GPU packages.** The `gpu` resource class is scheduled like any other, but CUDA inside AppContainer was verified only for the catalog `cuInit` path, not for researcher frameworks.

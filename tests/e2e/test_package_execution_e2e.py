@@ -100,7 +100,8 @@ class Node:
 def world(controller_factory, tmp_path, monkeypatch):
     import udcs_agent.jobs as agent_jobs
 
-    monkeypatch.setattr(agent_jobs, "USER_CODE_ENABLED", True)  # this process only
+    monkeypatch.setattr(agent_jobs, "USER_CODE_ENABLED", True)
+    monkeypatch.setattr(agent_jobs, "running_as_local_system", lambda: True)  # this process only
     monkeypatch.setenv("UDCS_CONFIG_DIR", str(tmp_path / "researcher-config"))
     monkeypatch.delenv("UDCS_TOKEN", raising=False)
     controller = controller_factory(
@@ -134,6 +135,29 @@ def world(controller_factory, tmp_path, monkeypatch):
             timeout=180,
         )
         assert ready, "the node never reported a verified AppContainer"
+        # The real procedure needs a SYSTEM-context exposure audit of this image. This
+        # test runs as an interactive user, so it records a synthetic report instead:
+        # it exercises the pipeline, not the lab-image gate (which it cannot pass here).
+        info = http.get(f"/admin/nodes/{node.node_id}", headers=admin).json()["inventory"]["os"]
+        recorded = http.post(
+            f"/admin/nodes/{node.node_id}/exposure-audits",
+            headers=admin,
+            json={
+                "generated_at": __import__("datetime")
+                .datetime.now(__import__("datetime").UTC)
+                .isoformat(),
+                "hostname": info["hostname"],
+                "os_release": info["release"],
+                "os_version": info["version"],
+                "build": 1,
+                "agent_version": "test",
+                "runner": "NT AUTHORITY\\SYSTEM (synthetic e2e report)",
+                "appcontainer": True,
+                "integrity_rid": 4096,
+                "privileges": ["SeChangeNotifyPrivilege"],
+            },
+        )
+        assert recorded.status_code == 201, recorded.text
         made = http.post(
             f"/admin/nodes/{node.node_id}/user-code",
             headers=admin,

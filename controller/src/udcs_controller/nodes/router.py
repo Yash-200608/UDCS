@@ -26,6 +26,7 @@ from udcs_controller.nodes.schemas import (
     NodeUserCodeUpdate,
     ResourceSummary,
 )
+from udcs_shared.exposure import ExposureReport
 
 router = APIRouter(tags=["nodes"])
 
@@ -204,6 +205,69 @@ def set_node_state(
     return service.to_out(node, now=now, settings=request.app.state.settings)
 
 
+@router.post("/admin/nodes/{node_id}/exposure-audits", status_code=status.HTTP_201_CREATED)
+def upload_exposure_audit(
+    node_id: uuid.UUID,
+    body: ExposureReport,
+    auth: ManageNodes,
+    request: Request,
+    db: DbSession,
+    now: Now,
+) -> dict:
+    """Record an AppContainer exposure report for this node (ADR 0003 procedure, step 2).
+    The controller judges it again; the report's own verdict is not used."""
+    node = _get_node(db, node_id)
+    try:
+        audit = service.record_exposure_audit(db, node, body, by=auth.user, now=now)
+    except service.EligibilityRefused as exc:
+        raise HTTPException(exc.status_code, detail=exc.detail) from None
+    record_event(
+        db,
+        request,
+        now=now,
+        actor_type=ActorType.USER,
+        actor_id=auth.user.id,
+        action="node.exposure_audit_recorded",
+        target_type="node",
+        target_id=str(node.id),
+        details={
+            "audit_id": str(audit.id),
+            "sha256": audit.sha256,
+            "passed": audit.passed,
+            "image": audit.image,
+            "runner": audit.runner,
+            "violations": audit.summary.get("violation_count", 0),
+        },
+    )
+    db.commit()
+    return {"id": str(audit.id), "sha256": audit.sha256, **audit.summary}
+
+
+@router.get("/admin/nodes/{node_id}/exposure-audits")
+def list_exposure_audits(node_id: uuid.UUID, auth: ManageNodes, db: DbSession) -> list[dict]:
+    from sqlalchemy import select
+
+    from udcs_controller.nodes.models import NodeExposureAudit
+
+    _get_node(db, node_id)
+    rows = db.scalars(
+        select(NodeExposureAudit)
+        .where(NodeExposureAudit.node_id == node_id)
+        .order_by(NodeExposureAudit.uploaded_at.desc())
+        .limit(50)
+    )
+    return [
+        {
+            "id": str(a.id),
+            "sha256": a.sha256,
+            "uploaded_at": a.uploaded_at.isoformat(),
+            "generated_at": a.generated_at.isoformat(),
+            **a.summary,
+        }
+        for a in rows
+    ]
+
+
 @router.post("/admin/nodes/{node_id}/user-code", response_model=NodeOut)
 def set_node_user_code(
     node_id: uuid.UUID,
@@ -213,13 +277,38 @@ def set_node_user_code(
     db: DbSession,
     now: Now,
 ) -> NodeOut:
-    """Administrator eligibility for user packages (ADR 0003). It is one of three
-    independent conditions: the controller flag, this flag, and the node's own measured
-    AppContainer. Revoking it stops new package assignments at once; jobs already on
-    the node finish or are cancelled by an administrator."""
+    """Grant or revoke user-code eligibility (ADR 0003 procedure). A grant needs an
+    ACTIVE node, a verified AppContainer and a passing, recent, SYSTEM-context exposure
+    audit of the node's current OS image; it is then bound to that image. A revoke is
+    always accepted and takes effect at the node's next sync (running package jobs are
+    requeued elsewhere and the node is told to cancel). Both are audited with a reason."""
     node = _get_node(db, node_id)
     previous = node.user_code_allowed
-    node.user_code_allowed = body.allowed
+    details: dict = {"from": previous, "to": body.allowed, "reason": body.reason}
+    if body.allowed:
+        try:
+            audit = service.grant_user_code(
+                db, node, by=auth.user, now=now, settings=request.app.state.settings
+            )
+        except service.EligibilityRefused as exc:
+            record_event(
+                db,
+                request,
+                now=now,
+                actor_type=ActorType.USER,
+                actor_id=auth.user.id,
+                action="node.user_code_refused",
+                target_type="node",
+                target_id=str(node.id),
+                details={**details, "refused": exc.detail},
+            )
+            db.commit()
+            raise HTTPException(exc.status_code, detail=exc.detail) from None
+        details.update(
+            audit_id=str(audit.id), audit_sha256=audit.sha256, image=node.user_code_image
+        )
+    else:
+        service.revoke_user_code(node)
     record_event(
         db,
         request,
@@ -229,7 +318,7 @@ def set_node_user_code(
         action="node.user_code_changed",
         target_type="node",
         target_id=str(node.id),
-        details={"from": previous, "to": body.allowed, "reason": body.reason},
+        details=details,
     )
     db.commit()
     return service.to_out(node, now=now, settings=request.app.state.settings)

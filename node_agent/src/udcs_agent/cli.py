@@ -137,6 +137,39 @@ def cmd_diagnose_gpu(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_audit_exposure(args: argparse.Namespace) -> int:
+    """Run the AppContainer exposure audit on this machine (ADR 0001 gate 2)."""
+    import json
+    import os
+
+    from udcs_agent.diagnostics.exposure_audit import run_audit
+    from udcs_shared.exposure import summary
+
+    if args.data_dir:
+        data_dir = Path(args.data_dir)
+    else:  # a scratch area the current user can write; nothing in the agent's data dir
+        data_dir = Path(os.environ.get("LOCALAPPDATA", ".")) / "UDCS" / "exposure-audit"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    report, _plan = run_audit(data_dir)
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(report.model_dump_json(indent=1), encoding="utf-8")
+    result = summary(report)
+    print(
+        json.dumps(
+            {
+                k: result[k]
+                for k in ("passed", "violation_count", "reachable", "truncated", "image", "runner")
+            },
+            indent=1,
+        )
+    )
+    for line in result["violations"][:50]:
+        print("VIOLATION:", line)
+    print(f"report: {out}")
+    return 0 if result["passed"] else 1
+
+
 def cmd_helper(_args: argparse.Namespace) -> int:
     from udcs_agent.session_helper import main
 
@@ -175,6 +208,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("diagnose-gpu").set_defaults(func=cmd_diagnose_gpu)
     sub.add_parser("helper").set_defaults(func=cmd_helper)
+    p = sub.add_parser("audit-exposure", help="what a UDCS AppContainer can reach on this image")
+    p.add_argument("--out", required=True, help="where to write the JSON report")
+    p.add_argument("--data-dir", help="scratch/runtime directory (default: per-user)")
+    p.set_defaults(func=cmd_audit_exposure)
     return parser
 
 

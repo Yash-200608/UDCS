@@ -201,6 +201,10 @@ def _requeue(db: Session, job: Job, *, now: datetime, reason: str, settings: Set
     job.local_state = None
     job.cpu_seconds = 0.0
     job.memory_bytes = 0
+    # Outputs and exit code belong to the attempt that produced them: a later attempt
+    # must never appear to have produced an earlier one's outputs.
+    job.output_manifest = None
+    job.exit_code = None
     job.updated_at = now
     resume = f"; resumes from checkpoint at {checkpoint.units_done} units" if checkpoint else ""
     add_log(db, job, f"requeued: {reason}{resume}", at=now)
@@ -407,6 +411,22 @@ def sync_node_jobs(
             (acknowledged if already_recorded else cancel).append(report.job_id)
             continue
         assert job is not None
+        if job.package_digest is not None:
+            from udcs_controller.nodes.service import user_code_unfit
+
+            unfit = user_code_unfit(node, settings)
+            if unfit:
+                # Eligibility revoked, capability lost, image changed or the controller
+                # flag switched off: stop the run here and let a fit node take it.
+                _requeue(
+                    db,
+                    job,
+                    now=now,
+                    reason=f"node may no longer run user code: {unfit}",
+                    settings=settings,
+                )
+                cancel.append(job.id)
+                continue
         if not node_active:
             _requeue(
                 db, job, now=now, reason=f"node is {node.admin_state.value}", settings=settings
@@ -455,13 +475,14 @@ def node_verified_appcontainer(node: Node) -> bool:
     return False
 
 
-def package_mismatch(db: Session, node: Node, capacity, job: Job) -> str | None:
+def package_mismatch(db: Session, node: Node, capacity, job: Job, settings: Settings) -> str | None:
     """Why this node must not receive this package job, or None if it may. Checked
     before the claim, so an incompatible node never holds the job (ADR 0003)."""
-    if not node.user_code_allowed:
-        return "node not eligible for user code (administrator setting)"
-    if not node_verified_appcontainer(node):
-        return "node has no verified AppContainer isolation"
+    from udcs_controller.nodes.service import user_code_unfit
+
+    unfit = user_code_unfit(node, settings)
+    if unfit:
+        return unfit
     if not capacity.user_code:
         return "node does not offer user code"
     from udcs_controller.packages.models import Package
@@ -540,7 +561,7 @@ def _assign(
         need = job.memory_mb if job.kind == WorkloadClass.MEMORY or job.package_digest else 64
         if need > memory_left:
             continue
-        if job.package_digest is not None and package_mismatch(db, node, capacity, job):
+        if job.package_digest is not None and package_mismatch(db, node, capacity, job, settings):
             continue  # left queued for a node that fits; never claimed by this one
         # Atomic claim: two nodes syncing at once can never both get this job.
         claimed = db.execute(

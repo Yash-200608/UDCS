@@ -27,6 +27,16 @@ class Node(Base):
     # Set by an administrator only. A node runs user code only if this is true AND it
     # reports a verified AppContainer AND it offers user code itself (ADR 0003).
     user_code_allowed: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
+    # What the grant was based on (operator procedure, ADR 0003): the OS image the passing
+    # exposure audit was taken on, that audit, and who granted it when. A different image
+    # in a later inventory suspends eligibility automatically.
+    user_code_image: Mapped[str | None] = mapped_column(String(330), nullable=True)
+    # A reference, not a foreign key (the two tables would point at each other).
+    user_code_audit_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    user_code_granted_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    user_code_granted_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
     credential_hash: Mapped[str] = mapped_column(String(64), unique=True)
     pending_credential_hash: Mapped[str | None] = mapped_column(
         String(64), unique=True, nullable=True
@@ -66,6 +76,30 @@ class HardwareInventoryRecord(Base):
     gpu_count: Mapped[int] = mapped_column(Integer)
     gpu_memory_total_bytes: Mapped[int] = mapped_column(BigInteger)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime())
+
+
+class NodeExposureAudit(Base):
+    """One uploaded AppContainer exposure report for a node (history is kept). The
+    controller re-judges every report with udcs_shared.exposure.violations(); the
+    uploader's own verdict is not trusted."""
+
+    __tablename__ = "node_exposure_audits"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    node_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("nodes.id", ondelete="CASCADE"), index=True
+    )
+    sha256: Mapped[str] = mapped_column(String(64))
+    image: Mapped[str] = mapped_column(String(330))
+    runner: Mapped[str] = mapped_column(String(64))
+    passed: Mapped[bool] = mapped_column(Boolean)
+    summary: Mapped[dict[str, Any]] = mapped_column(JSONType)
+    report: Mapped[dict[str, Any]] = mapped_column(JSONType)
+    generated_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    uploaded_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    uploaded_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
 
 
 class EnrollmentKey(Base):

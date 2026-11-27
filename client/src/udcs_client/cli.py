@@ -689,6 +689,77 @@ def _job_id(value: str) -> str:
         raise argparse.ArgumentTypeError(f"{value!r} is not a job id") from None
 
 
+# -- administrators: user-code eligibility (docs/operations/node-eligibility.md) -------------
+
+
+def _admin_call(ctx: Ctx, method: str, path: str, **kwargs):
+    api = ctx.connect()
+    response = api._call(method, path, **kwargs)
+    if response.status_code == 403:
+        raise ClientError("this needs an administrator account (manage_nodes)", Exit.USAGE)
+    if response.status_code == 404:
+        raise ClientError("node not found", Exit.USAGE)
+    if response.status_code >= 400:
+        raise ClientError(f"refused: {api._detail(response)}", Exit.INVALID)
+    return response.json()
+
+
+def cmd_admin_nodes(ctx: Ctx) -> int:
+    for n in _admin_call(ctx, "GET", "/admin/nodes"):
+        flag = "ELIGIBLE" if n.get("user_code_allowed") else "not eligible"
+        blocked = f" (blocked: {n['user_code_blocked']})" if n.get("user_code_blocked") else ""
+        ctx.say(f"{n['id']}  {n['hostname']}  {n['admin_state']}  {flag}{blocked}")
+    return Exit.OK
+
+
+def cmd_admin_audit_upload(ctx: Ctx) -> int:
+    from udcs_shared.exposure import ExposureReport
+
+    try:
+        report = ExposureReport.model_validate_json(Path(ctx.args.report).read_bytes())
+    except (OSError, ValueError) as exc:
+        raise ClientError(f"not an exposure report: {sanitize(exc)[:300]}", Exit.INVALID) from None
+    body = _admin_call(
+        ctx,
+        "POST",
+        f"/admin/nodes/{ctx.args.node}/exposure-audits",
+        json=report.model_dump(mode="json"),
+    )
+    ctx.say(f"recorded audit {body['id']} (sha256 {body['sha256'][:16]})")
+    ctx.say(f"image {body['image']}, run as {body['runner']}")
+    ctx.say("PASSED" if body["passed"] else f"FAILED: {body['violation_count']} violations")
+    for line in body.get("violations", [])[:30]:
+        ctx.say(f"  {line}")
+    return Exit.OK if body["passed"] else Exit.VERIFICATION
+
+
+def cmd_admin_audits(ctx: Ctx) -> int:
+    for a in _admin_call(ctx, "GET", f"/admin/nodes/{ctx.args.node}/exposure-audits"):
+        verdict = "passed" if a["passed"] else f"{a['violation_count']} violations"
+        ctx.say(f"{a['uploaded_at']}  {a['image']}  {a['runner']}  {verdict}  {a['sha256'][:16]}")
+    return Exit.OK
+
+
+def cmd_admin_user_code(ctx: Ctx) -> int:
+    allowed = ctx.args.action == "allow"
+    if allowed and not ctx.confirm(
+        f"Allow node {ctx.args.node} to run researchers' code? This is audited."
+    ):
+        ctx.say("not changed")
+        return Exit.USAGE
+    body = _admin_call(
+        ctx,
+        "POST",
+        f"/admin/nodes/{ctx.args.node}/user-code",
+        json={"allowed": allowed, "reason": ctx.args.reason},
+    )
+    if allowed:
+        ctx.say(f"node {body['hostname']} is eligible for image {body['user_code_image']}")
+    else:
+        ctx.say(f"node {body['hostname']} is no longer eligible; running package jobs move away")
+    return Exit.OK
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="udcs", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -773,6 +844,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("-y", "--yes", action="store_true")
     p.set_defaults(func=cmd_dataset_push)
+
+    admin = sub.add_parser("admin", help="administrators: node eligibility for user code")
+    asub = admin.add_subparsers(dest="admin", required=True)
+    asub.add_parser("nodes", help="nodes and their eligibility").set_defaults(func=cmd_admin_nodes)
+    p = asub.add_parser("audit-upload", help="record an exposure report for a node")
+    p.add_argument("node", type=_job_id, help="node id")
+    p.add_argument("report", help="report JSON from `udcs-agent audit-exposure`")
+    p.set_defaults(func=cmd_admin_audit_upload)
+    p = asub.add_parser("audits", help="a node's exposure audit history")
+    p.add_argument("node", type=_job_id)
+    p.set_defaults(func=cmd_admin_audits)
+    p = asub.add_parser("user-code", help="grant or revoke a node's eligibility")
+    p.add_argument("action", choices=["allow", "revoke"])
+    p.add_argument("node", type=_job_id)
+    p.add_argument("--reason", required=True, help="recorded in the audit log (3-200 chars)")
+    p.add_argument("-y", "--yes", action="store_true")
+    p.set_defaults(func=cmd_admin_user_code)
 
     p = add("jobs", cmd_jobs, "list your jobs")
     p.add_argument(

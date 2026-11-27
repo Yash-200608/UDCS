@@ -81,6 +81,11 @@ class NodeOut(BaseModel):
     user_code_ready: bool = Field(
         default=False, description="eligible AND reports a verified AppContainer"
     )
+    user_code_image: str | None = Field(default=None, description="the audited OS image")
+    user_code_granted_at: datetime | None = None
+    user_code_blocked: str | None = Field(
+        default=None, description="eligible, but why it may not run user code right now"
+    )
 
 
 class NodeUserCodeUpdate(BaseModel):

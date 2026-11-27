@@ -357,6 +357,19 @@ def job_outputs(job_id: uuid.UUID, auth: SubmitJobs, db: DbSession):
 # -- nodes ------------------------------------------------------------------------------------
 
 
+def _node_fit(request: Request, node) -> None:
+    """Every node package endpoint applies the same rule as the scheduler: a node whose
+    eligibility was revoked, whose capability or image changed, or a deployment whose
+    flag was switched off, gets nothing more (it is told to cancel at its next sync)."""
+    from udcs_controller.nodes.service import user_code_unfit
+
+    unfit = user_code_unfit(node, request.app.state.settings)
+    if unfit:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, detail=f"not the current assignment ({unfit})"
+        )
+
+
 def _assigned_job(db, node, job_id: uuid.UUID, attempt: int) -> Job:
     job = db.get(Job, job_id)
     if (
@@ -380,6 +393,7 @@ def package_for_job(
 ):
     """The manifests the node must stage: the package, its environment, its datasets."""
     _user_code_enabled(request)
+    _node_fit(request, node)
     job = _assigned_job(db, node, job_id, attempt)
     package = db.get(Package, job.package_digest)
     return {"package": package.digest, "manifests": service.staging_closure(db, package)}
@@ -396,6 +410,7 @@ def node_download(
     range_header: Annotated[str | None, Header(alias="Range")] = None,
 ):
     _user_code_enabled(request)
+    _node_fit(request, node)
     job = db.get(Job, job_id)
     if (
         job is None
@@ -409,6 +424,7 @@ def node_download(
 
 def _node_upload(request: Request, db, node, upload_id: uuid.UUID) -> BlobUpload:
     _user_code_enabled(request)
+    _node_fit(request, node)
     upload = db.get(BlobUpload, upload_id)
     if upload is None or upload.node_id != node.id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="upload not found")
@@ -430,6 +446,7 @@ def node_start_upload(
     if body.job_id is None or body.attempt is None:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="job_id and attempt required")
     _user_code_enabled(request)
+    _node_fit(request, node)
     job = _assigned_job(db, node, uuid.UUID(body.job_id), body.attempt)
     try:
         upload = service.begin_upload(
@@ -492,6 +509,7 @@ def put_outputs(
     job_id: uuid.UUID, body: OutputManifest, node: CurrentNode, request: Request, db: DbSession
 ):
     _user_code_enabled(request)
+    _node_fit(request, node)
     job = db.get(Job, job_id)
     if job is None:
         raise HTTPException(status.HTTP_409_CONFLICT, detail="not the current assignment")

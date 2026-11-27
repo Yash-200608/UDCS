@@ -13,7 +13,12 @@ from sqlalchemy.orm import Session
 from udcs_controller.auth.models import User
 from udcs_controller.config import Settings
 from udcs_controller.core import security
-from udcs_controller.nodes.models import EnrollmentKey, HardwareInventoryRecord, Node
+from udcs_controller.nodes.models import (
+    EnrollmentKey,
+    HardwareInventoryRecord,
+    Node,
+    NodeExposureAudit,
+)
 from udcs_controller.nodes.schemas import Connectivity, GpuModelSummary, NodeOut, ResourceSummary
 from udcs_shared.agent_api import (
     ENROLLMENT_KEY_PREFIX,
@@ -24,6 +29,7 @@ from udcs_shared.agent_api import (
     HeartbeatResponse,
     NodeAdminState,
 )
+from udcs_shared.exposure import ExposureReport, image_key, summary
 from udcs_shared.hardware import HardwareInventory
 from udcs_shared.protection import ProtectionPolicy
 from udcs_shared.telemetry import TelemetrySnapshot
@@ -296,6 +302,9 @@ def to_out(node: Node, *, now: datetime, settings: Settings) -> NodeOut:
         latest_telemetry=_parse_or_none(TelemetrySnapshot, node.latest_telemetry),
         user_code_allowed=node.user_code_allowed,
         user_code_ready=node.user_code_allowed and _verified_appcontainer(node),
+        user_code_image=node.user_code_image,
+        user_code_granted_at=node.user_code_granted_at,
+        user_code_blocked=user_code_unfit(node, settings) if node.user_code_allowed else None,
     )
 
 
@@ -354,3 +363,144 @@ def _verified_appcontainer(node: Node) -> bool:
     from udcs_controller.jobs.service import node_verified_appcontainer
 
     return node_verified_appcontainer(node)
+
+
+# -- user-code eligibility (ADR 0003 operator procedure) -------------------------------------
+
+
+class EligibilityRefused(Exception):
+    def __init__(self, status_code: int, detail: str) -> None:
+        super().__init__(detail)
+        self.status_code = status_code
+        self.detail = detail
+
+
+def node_image(node: Node) -> str | None:
+    """The OS image a node currently reports: what eligibility is bound to."""
+    if node.inventory is None:
+        return None
+    os_info = node.inventory.inventory.get("os") or {}
+    if not os_info.get("release") or not os_info.get("version"):
+        return None
+    return image_key(os_info["release"], os_info["version"])
+
+
+def user_code_unfit(node: Node, settings: Settings) -> str | None:
+    """Why this node may not run user code *right now*, or None. One rule, used by the
+    scheduler, the job sync and every node package endpoint, so revoking eligibility,
+    losing a capability or switching the controller flag off stops work everywhere."""
+    from udcs_controller.jobs.service import node_verified_appcontainer
+
+    if not settings.user_code_enabled:
+        return "user code execution is disabled on this deployment"
+    if node.admin_state != NodeAdminState.ACTIVE:
+        return f"node is {node.admin_state.value}"
+    if not node.user_code_allowed:
+        return "node not eligible for user code (administrator setting)"
+    if not node_verified_appcontainer(node):
+        return "node no longer reports a verified AppContainer"
+    if node.user_code_image is None or node.user_code_image != node_image(node):
+        return "node image differs from the audited one"
+    return None
+
+
+def record_exposure_audit(
+    db: Session, node: Node, report: ExposureReport, *, by: User, now: datetime
+) -> NodeExposureAudit:
+    """Store an exposure report for a node, re-judged here (the uploader's verdict is
+    never trusted). The report must come from this node's host."""
+    import hashlib
+
+    if node.inventory is None:
+        raise EligibilityRefused(409, "the node has not reported an inventory yet")
+    if report.hostname.lower() != (node.hostname or "").lower():
+        raise EligibilityRefused(
+            422, f"the report is from host {report.hostname!r}, not {node.hostname!r}"
+        )
+    generated = report.generated_at
+    if generated.tzinfo is None:
+        from datetime import UTC
+
+        generated = generated.replace(tzinfo=UTC)
+    if generated > now + timedelta(minutes=10):
+        # A future date would pass the age check forever.
+        raise EligibilityRefused(422, "the report is dated in the future; check the node's clock")
+    result = summary(report)
+    canonical = report.model_dump_json().encode()
+    record = NodeExposureAudit(
+        node_id=node.id,
+        sha256=hashlib.sha256(canonical).hexdigest(),
+        image=report.image(),
+        runner=report.runner[:64],
+        passed=result["passed"],
+        summary=result,
+        report=report.model_dump(mode="json"),
+        generated_at=report.generated_at,
+        uploaded_at=now,
+        uploaded_by_user_id=by.id,
+    )
+    db.add(record)
+    db.flush()
+    return record
+
+
+def grant_user_code(
+    db: Session, node: Node, *, by: User, now: datetime, settings: Settings
+) -> NodeExposureAudit:
+    """Make a node eligible. Preconditions (each refused with a reason):
+    ACTIVE; a verified AppContainer in its inventory; and a passing exposure audit of
+    its *current* image, taken by a SYSTEM-context run, no older than the configured
+    maximum. Eligibility is then bound to that image and audit."""
+    from udcs_controller.jobs.service import node_verified_appcontainer
+
+    if node.admin_state != NodeAdminState.ACTIVE:
+        raise EligibilityRefused(409, f"node is {node.admin_state.value}; only ACTIVE nodes")
+    image = node_image(node)
+    if image is None:
+        raise EligibilityRefused(409, "the node has not reported its OS image")
+    if not node_verified_appcontainer(node):
+        raise EligibilityRefused(409, "the node does not report a verified AppContainer")
+    audit = db.scalars(
+        select(NodeExposureAudit)
+        .where(NodeExposureAudit.node_id == node.id)
+        .order_by(NodeExposureAudit.uploaded_at.desc())
+        .limit(1)
+    ).first()
+    if audit is None:
+        raise EligibilityRefused(409, "no exposure audit has been recorded for this node")
+    if not audit.passed:
+        raise EligibilityRefused(409, "the latest exposure audit has violations")
+    if audit.image != image:
+        raise EligibilityRefused(
+            409, f"the latest audit is of image {audit.image}, node runs {image}"
+        )
+    if "SYSTEM" not in audit.runner.upper():
+        raise EligibilityRefused(409, "the audit must be run as SYSTEM (the service context)")
+    generated = audit.generated_at
+    if generated.tzinfo is None:
+        from datetime import UTC
+
+        generated = generated.replace(tzinfo=UTC)
+    if now - generated > timedelta(days=settings.exposure_audit_max_age_days):
+        raise EligibilityRefused(409, "the latest exposure audit is too old; run it again")
+    node.user_code_allowed = True
+    node.user_code_image = image
+    node.user_code_audit_id = audit.id
+    node.user_code_granted_at = now
+    node.user_code_granted_by_user_id = by.id
+    return audit
+
+
+def revoke_user_code(node: Node) -> None:
+    """Always allowed, in any state. Takes effect at the node's next sync: package jobs
+    on it are requeued and the node is told to cancel them."""
+    node.user_code_allowed = False
+
+
+def suspend_if_image_changed(node: Node) -> bool:
+    """After an inventory update: a different OS image than the audited one suspends
+    eligibility (a reimaged lab PC must be audited again). True if suspended."""
+    if node.user_code_allowed and node.user_code_image != node_image(node):
+        node.user_code_allowed = False
+        return True
+    return False

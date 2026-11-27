@@ -106,6 +106,21 @@ def put_inventory(
     body: InventoryUpdate, node: CurrentNode, request: Request, db: DbSession, now: Now
 ) -> Response:
     changed = service.store_inventory(db, node, body.inventory, now=now)
+    if changed and service.suspend_if_image_changed(node):
+        record_event(
+            db,
+            request,
+            now=now,
+            actor_type=ActorType.SYSTEM,
+            action="node.user_code_suspended",
+            target_type="node",
+            target_id=str(node.id),
+            details={
+                "reason": "OS image changed since the exposure audit",
+                "audited_image": node.user_code_image,
+                "reported_image": service.node_image(node),
+            },
+        )
     if changed:
         record_event(
             db,

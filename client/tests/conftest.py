@@ -227,6 +227,23 @@ def project(tmp_path) -> Path:
     )
 
 
+def synthetic_exposure_report(hostname: str, release: str, version: str) -> dict:
+    """TEST ONLY: a passing, SYSTEM-context exposure report, so tests can exercise the
+    eligibility procedure through the real endpoints. It is not an audit of anything."""
+    return {
+        "generated_at": __import__("datetime").datetime.now(__import__("datetime").UTC).isoformat(),
+        "hostname": hostname,
+        "os_release": release,
+        "os_version": version,
+        "build": 1,
+        "agent_version": "test",
+        "runner": "NT AUTHORITY\\SYSTEM (synthetic test report)",
+        "appcontainer": True,
+        "integrity_rid": 4096,
+        "privileges": ["SeChangeNotifyPrivilege"],
+    }
+
+
 class SimulatedNode:
     """Takes a package job and reports outputs through the real node API. It executes
     nothing: it is how the client is tested in-process. It reports a verified
@@ -267,6 +284,11 @@ class SimulatedNode:
         self.http.headers["Authorization"] = f"Bearer {enrolled.json()['node_credential']}"
         self.node_id = enrolled.json()["node_id"]
         if eligible:
+            audit = admin.post(
+                f"/admin/nodes/{self.node_id}/exposure-audits",
+                json=synthetic_exposure_report("sim", "11", "10.0.22631"),
+            )
+            assert audit.status_code == 201, audit.text
             made = admin.post(
                 f"/admin/nodes/{self.node_id}/user-code",
                 json={"allowed": True, "reason": "test node"},
@@ -346,4 +368,5 @@ def h():
         write_project=write_project,
         sha=sha,
         upload=upload,
+        synthetic_exposure_report=synthetic_exposure_report,
     )

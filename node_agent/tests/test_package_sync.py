@@ -126,6 +126,7 @@ class FakeController:
 @pytest.fixture
 def enabled(monkeypatch):
     monkeypatch.setattr(agent_jobs, "USER_CODE_ENABLED", True)
+    monkeypatch.setattr(agent_jobs, "running_as_local_system", lambda: True)
 
 
 def _sync(tmp_path, snapshot, *, isolation="appcontainer"):
@@ -170,6 +171,7 @@ def _reports(sync):
 def test_user_code_is_offered_only_when_enabled_and_isolated(tmp_path, monkeypatch):
     assert not _sync(tmp_path, {}).capacity().user_code  # the shipped default
     monkeypatch.setattr(agent_jobs, "USER_CODE_ENABLED", True)
+    monkeypatch.setattr(agent_jobs, "running_as_local_system", lambda: True)
     assert not _sync(tmp_path, {}, isolation="host").capacity().user_code
     offer = _sync(tmp_path, {}).capacity()
     assert offer.user_code and offer.python == agent_jobs.NODE_PYTHON and offer.platform
@@ -399,3 +401,22 @@ def test_a_package_checkpoint_is_restored_into_state_after_staging(tmp_path, ena
 
     entry = sync._assignments[str(a.job_id)]
     assert (Path(entry["run"]["root"]) / "state" / "checkpoint.bin").read_bytes() == payload
+
+
+def test_an_interactive_agent_never_offers_user_code(tmp_path, monkeypatch):
+    """Exposure audit, build 26300: a sandbox launched by an agent running as the
+    logged-in user can stop that user's per-user services and open the student's
+    desktop. Only an agent running as LocalSystem may offer user code."""
+    monkeypatch.setattr(agent_jobs, "USER_CODE_ENABLED", True)
+    monkeypatch.setattr(agent_jobs, "running_as_local_system", lambda: False)
+    assert not _sync(tmp_path, {}).capacity().user_code
+    monkeypatch.setattr(agent_jobs, "running_as_local_system", lambda: True)
+    assert _sync(tmp_path, {}).capacity().user_code
+
+
+def test_this_test_process_is_not_local_system():
+    import sys
+
+    if sys.platform != "win32":
+        pytest.skip("Windows")
+    assert agent_jobs.running_as_local_system() is False  # tests run as a normal user

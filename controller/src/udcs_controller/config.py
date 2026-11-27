@@ -46,6 +46,9 @@ class Settings(BaseSettings):
     job_max_requeues: int = Field(default=10, ge=1, le=100)
     max_active_jobs_per_user: int = Field(default=50, ge=1, le=100_000)
     job_log_lines_max: int = Field(default=500, ge=50, le=100_000)
+    # Operator procedure (ADR 0003): a grant needs a passing exposure audit of the node's
+    # current OS image that is at most this old.
+    exposure_audit_max_age_days: int = Field(default=90, ge=1, le=3650)
     # User code (ADR 0001/0002). OFF until every ADR gate has passed; packaging, storage and
     # staging work regardless, but no package job is accepted while this is false.
     user_code_enabled: bool = False

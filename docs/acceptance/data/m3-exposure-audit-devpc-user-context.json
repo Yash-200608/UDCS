@@ -1,0 +1,56 @@
+{
+ "passed": false,
+ "violations": [
+  "service controllable: service BcastDVRUserService_131ccf (stop)",
+  "service controllable: service CredentialEnrollmentManagerUserSvc_131ccf (stop)",
+  "service controllable: service DeviceAssociationBrokerSvc_131ccf (stop)",
+  "service controllable: service DevicePickerUserSvc_131ccf (stop)",
+  "service controllable: service DevicesFlowUserSvc_131ccf (stop)",
+  "service controllable: service PimIndexMaintenanceSvc_131ccf (stop)",
+  "service controllable: service PrintWorkflowUserSvc_131ccf (stop)",
+  "service controllable: service UdkUserSvc_131ccf (stop)",
+  "service controllable: service UnistoreSvc_131ccf (stop)",
+  "service controllable: service UserDataSvc_131ccf (stop)",
+  "service controllable: service WpnUserService_131ccf (stop)",
+  "interactive session reachable: window WinSta0\\Default (open)"
+ ],
+ "violation_count": 12,
+ "reachable": {
+  "filesystem": {
+   "list": 118
+  },
+  "registry": {
+   "read": 6221
+  },
+  "pipe": {
+   "connect": 10
+  },
+  "object": {
+   "open": 8
+  },
+  "service": {
+   "query": 40,
+   "start": 34,
+   "stop": 11
+  },
+  "window": {
+   "open": 1
+  }
+ },
+ "coverage": {
+  "filesystem": 140,
+  "registry": 6346,
+  "registry_values": 1,
+  "process": 311,
+  "pipe": 309,
+  "object": 1023,
+  "network": 21,
+  "service": 298,
+  "window": 3
+ },
+ "truncated": [],
+ "image": "11|10.0.26300",
+ "build": 26300,
+ "runner_context": "user",
+ "generated_at": "2026-11-27T16:02:10.769941+00:00"
+}

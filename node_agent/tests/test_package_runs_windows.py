@@ -380,3 +380,89 @@ def test_a_package_imports_from_its_approved_environment(tmp_path, isolation):
     assert (staged.root / "out" / "a.txt").read_text() == "42"
     with pytest.raises(PermissionError):
         (staged.environment / "fakenum" / "__init__.py").write_text("tampered")
+
+
+def test_cancelling_a_run_kills_its_whole_process_tree(tmp_path, isolation):
+    import psutil
+
+    code = (
+        "import subprocess, sys, time\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(600)'])\n"
+        "open('out/child.txt', 'w').write(str(child.pid))\n"
+        "time.sleep(600)\n"
+    )
+    root = _stage(tmp_path, {"main.py": code})
+    manager = WorkloadManager(tmp_path, restart_backoff_seconds=0.5, isolation=isolation)
+    wid = "pkg-cancel-" + uuid.uuid4().hex[:8]
+    manager.add(
+        WorkloadSpec(
+            id=wid,
+            kind="cpu",
+            checkpointable=False,
+            isolation="appcontainer",
+            package_root=str(root),
+            entry="main.py",
+            import_paths=[str(root / "src")],
+            read_only=[str(root / "src"), str(root / "config.json")],
+        )
+    )
+    try:
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline and not (root / "out" / "child.txt").exists():
+            manager.enforce(POLICY.envelopes[L.OPEN], Assessment(L.OPEN, ()), POLICY, RAM)
+            time.sleep(0.2)
+        child = int((root / "out" / "child.txt").read_text())
+        main = manager._running[wid].process.pid
+        assert psutil.pid_exists(child) and psutil.pid_exists(main)
+        WorkloadManager.queue_request(tmp_path, "remove", workload_id=wid, purge=True)
+        manager.enforce(POLICY.envelopes[L.OPEN], Assessment(L.OPEN, ()), POLICY, RAM)
+        gone = time.monotonic() + 10
+        while time.monotonic() < gone and (psutil.pid_exists(child) or psutil.pid_exists(main)):
+            time.sleep(0.1)
+        assert not psutil.pid_exists(child), "the package's child survived cancellation"
+        assert not psutil.pid_exists(main)
+    finally:
+        manager.shutdown()
+
+
+def test_the_exposure_audit_probe_runs_in_appcontainer_and_finds_no_hard_leaks(tmp_path):
+    """The audit tool itself, run for real on this machine as the test user. Only the
+    invariants that must hold in any context are asserted; the interactive-user context
+    is expected to show its own violations (the user's per-user services and desktop),
+    which is why user code is offered only by a LocalSystem agent."""
+    from udcs_agent.diagnostics.exposure_audit import run_audit
+    from udcs_shared.exposure import Category, violations
+
+    report, plan = run_audit(tmp_path)
+    assert report.appcontainer and report.integrity_rid <= 0x1000
+    assert set(report.privileges) <= {"SeChangeNotifyPrivilege"}
+    assert not report.truncated, report.errors
+    assert report.coverage.get("filesystem", 0) > 10 and report.coverage.get("registry", 0) > 100
+    assert report.coverage.get("pipe", 0) > 0 and report.coverage.get("network", 0) > 2
+    hard = [f for f in report.findings if f.category == Category.NETWORK]
+    assert not hard, hard
+    writable = [
+        f for f in report.findings if f.category == Category.FILESYSTEM and f.access != "list"
+    ]
+    assert not writable, writable[:5]
+    sensitive = [
+        f
+        for f in report.findings
+        if f.sensitive and f.category in (Category.FILESYSTEM, Category.REGISTRY)
+    ]
+    assert not sensitive, sensitive[:5]
+    controllable = [
+        f for f in report.findings if f.category == Category.PROCESS and f.access != "query"
+    ]
+    assert not controllable, controllable[:5]
+    # The data directory itself (here, tmp_path) is sensitive and must not be listable.
+    assert str(tmp_path) in plan["sensitive_fs"]
+    found = violations(report)
+    if not agent_running_as_system():
+        assert all("service controllable" in v or "interactive session" in v for v in found), found
+
+
+def agent_running_as_system() -> bool:
+    from udcs_agent.jobs import running_as_local_system
+
+    return running_as_local_system()

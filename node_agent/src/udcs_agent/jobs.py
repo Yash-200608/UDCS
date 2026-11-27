@@ -71,8 +71,28 @@ NODE_PYTHON = f"{sys.version_info.major}.{sys.version_info.minor}"  # what packa
 NODE_PLATFORM = sysconfig.get_platform().replace("-", "_").replace(".", "_")
 
 
+def running_as_local_system() -> bool:
+    """True when the agent runs as LocalSystem (the installed service).
+
+    Measured with the exposure audit on Windows build 26300: an AppContainer launched by
+    an agent running as the *interactive user* can stop that user's per-user services
+    and open the student's WinSta0 Default desktop, because the user's SID is in the
+    sandbox token. As SYSTEM, a private window station is created and the student's
+    per-user services are not the token's. User code is therefore never offered from
+    an interactive agent.
+    """
+    if sys.platform != "win32":
+        return False
+    try:
+        from udcs_agent.winplat import appcontainer as ac
+
+        return ac.current_user_sid() == "S-1-5-18"
+    except OSError:
+        return False
+
+
 def user_code_offered(isolation: str) -> bool:
-    return USER_CODE_ENABLED and isolation == "appcontainer"
+    return USER_CODE_ENABLED and isolation == "appcontainer" and running_as_local_system()
 
 
 READD_AFTER_SECONDS = 10.0

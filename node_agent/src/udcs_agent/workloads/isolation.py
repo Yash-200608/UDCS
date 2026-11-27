@@ -29,7 +29,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 RUNTIME_FILES = ("synthetic.py", "cudadrv.py")
-_DIAGNOSTIC_FILES = ("isolation_probe.py",)
+_DIAGNOSTIC_FILES = ("isolation_probe.py", "exposure_probe.py")
 
 
 class IsolationLevel(StrEnum):

@@ -382,10 +382,13 @@ def _eligible(app, enroll, inventory_factory, hostname, *, allowed=True, appcont
     """Enroll a node that may receive package jobs: verified AppContainer reported in its
     inventory, and the administrator's per-node flag set (ADR 0003)."""
     from udcs_controller.nodes.models import Node
+    from udcs_controller.nodes.service import node_image
 
     body, headers, _ = enroll(inventory_factory(hostname=hostname, appcontainer=appcontainer))
     with app.state.sessionmaker() as db:
-        db.get(Node, uuid.UUID(body["node_id"])).user_code_allowed = allowed
+        node = db.get(Node, uuid.UUID(body["node_id"]))
+        node.user_code_allowed = allowed
+        node.user_code_image = node_image(node)  # as a grant after a passing audit would
         db.commit()
     return body, headers, None
 
@@ -892,7 +895,7 @@ def test_output_manifest_rejects_a_file_directory_clash():
 # -- package execution (ADR 0003): contract, eligibility, fencing, failure classes -----------
 
 
-def _report(job_id, attempt, state, **fields):
+def _report_line(job_id, attempt, state, **fields):
     return {"job_id": job_id, "attempt": attempt, "state": state, "units_done": 0, **fields}
 
 
@@ -1096,7 +1099,9 @@ def test_a_stale_attempt_cannot_publish_outputs_or_results(
         == 409
     )
     response = _sync_reports(
-        client, old, [_report(job["id"], first["attempt"], "completed", package_result=_result(0))]
+        client,
+        old,
+        [_report_line(job["id"], first["attempt"], "completed", package_result=_result(0))],
     )
     assert job["id"] in response["cancel"]
     assert (
@@ -1107,7 +1112,11 @@ def test_a_stale_attempt_cannot_publish_outputs_or_results(
     _sync_reports(
         client,
         new,
-        [_report(job["id"], second["attempt"], "completed", package_result=_result(0, out, 1))],
+        [
+            _report_line(
+                job["id"], second["attempt"], "completed", package_result=_result(0, out, 1)
+            )
+        ],
     )
     final = client.get(f"{API}/jobs/{job['id']}", headers=student_headers).json()
     assert final["state"] == "succeeded" and final["exit_code"] == 0
@@ -1122,7 +1131,9 @@ def test_a_result_must_name_the_outputs_this_attempt_reported(
     [a] = _sync_reports(client, node, [], user_code=True)["assignments"]
     _publish(client, node, job["id"], a["attempt"], {"r.txt": b"real"})
     lie = _result(0, "f" * 64, 1)
-    _sync_reports(client, node, [_report(job["id"], a["attempt"], "completed", package_result=lie)])
+    _sync_reports(
+        client, node, [_report_line(job["id"], a["attempt"], "completed", package_result=lie)]
+    )
     after = client.get(f"{API}/jobs/{job['id']}", headers=student_headers).json()
     assert after["state"] == "queued" and "different outputs" in after["error"]  # retried
 
@@ -1138,7 +1149,7 @@ def test_workload_failures_are_final_and_infrastructure_failures_retry(
         client,
         node,
         [
-            _report(
+            _report_line(
                 job["id"], a["attempt"], "failed", failure="infrastructure", error="staging failed"
             )
         ],
@@ -1151,7 +1162,7 @@ def test_workload_failures_are_final_and_infrastructure_failures_retry(
         client,
         node,
         [
-            _report(
+            _report_line(
                 job["id"],
                 b["attempt"],
                 "failed",
@@ -1166,7 +1177,9 @@ def test_workload_failures_are_final_and_infrastructure_failures_retry(
     job2 = _package_job(app, client, student_headers, digest)
     [c] = _sync_reports(client, node, [], user_code=True)["assignments"]
     _sync_reports(
-        client, node, [_report(job2["id"], c["attempt"], "completed", package_result=_result(7))]
+        client,
+        node,
+        [_report_line(job2["id"], c["attempt"], "completed", package_result=_result(7))],
     )
     done = client.get(f"{API}/jobs/{job2['id']}", headers=student_headers).json()
     assert done["state"] == "failed" and done["exit_code"] == 7 and done["failures"] == 0
@@ -1198,29 +1211,212 @@ def test_cancel_during_result_upload_stops_publication(
         client.put(f"{API}/agent/jobs/{job['id']}/outputs", headers=node, json=forged).status_code
         == 409
     )
-    response = _sync_reports(client, node, [_report(job["id"], a["attempt"], "uploading")])
+    response = _sync_reports(client, node, [_report_line(job["id"], a["attempt"], "uploading")])
     assert job["id"] in response["cancel"]
 
 
-def test_node_eligibility_is_admin_only_and_audited(
-    app, client, student_headers, admin_headers, enroll, inventory_factory
+def _report(hostname, *, runner="NT AUTHORITY\\SYSTEM (service)", version="10.0.22631", **fields):
+    body = {
+        "generated_at": "2026-01-05T08:00:00Z",
+        "hostname": hostname,
+        "os_release": "11",
+        "os_version": version,
+        "build": 22631,
+        "agent_version": "0.1.0",
+        "runner": runner,
+        "appcontainer": True,
+        "integrity_rid": 0x1000,
+        "privileges": ["SeChangeNotifyPrivilege"],
+        "coverage": {"filesystem": 10},
+        "findings": [
+            {"category": "filesystem", "target": "C:\\Program Files", "access": "list"},
+            {"category": "pipe", "target": "epmapper", "access": "connect"},
+        ],
+    }
+    body.update(fields)
+    return body
+
+
+def test_node_eligibility_follows_the_operator_procedure(
+    app, client, student_headers, admin_headers, enroll, inventory_factory, clock
 ):
+    """Grant needs: admin, ACTIVE, verified AppContainer, and a passing SYSTEM-context
+    exposure audit of the node's current image, re-judged by the controller."""
     body, _, _ = enroll(inventory_factory(hostname="audit-node", appcontainer=True))
-    url = f"{API}/admin/nodes/{body['node_id']}/user-code"
+    node = body["node_id"]
+    audits = f"{API}/admin/nodes/{node}/exposure-audits"
+    grant = f"{API}/admin/nodes/{node}/user-code"
     payload = {"allowed": True, "reason": "lab image reviewed"}
-    assert client.post(url, headers=student_headers, json=payload).status_code == 403
-    made = client.post(url, headers=admin_headers, json=payload)
+    assert client.post(grant, headers=student_headers, json=payload).status_code == 403
     assert (
-        made.status_code == 200
-        and made.json()["user_code_allowed"]
-        and made.json()["user_code_ready"]
+        client.post(audits, headers=student_headers, json=_report("audit-node")).status_code == 403
     )
+    refused = client.post(grant, headers=admin_headers, json=payload)
+    assert refused.status_code == 409 and "no exposure audit" in refused.text
+
+    # A report claiming "passed" with a violation inside is judged again here.
+    lying = _report(
+        "audit-node",
+        findings=[{"category": "network", "target": "1.1.1.1:443", "access": "connect"}],
+        passed=True,
+    )
+    assert client.post(audits, headers=admin_headers, json=lying).status_code == 422  # extra field
+    del lying["passed"]
+    clock.advance(seconds=1)
+    recorded = client.post(audits, headers=admin_headers, json=lying)
+    assert recorded.status_code == 201 and recorded.json()["passed"] is False
+    assert "violations" in client.post(grant, headers=admin_headers, json=payload).text
+
+    clock.advance(seconds=1)
+    future = client.post(
+        audits,
+        headers=admin_headers,
+        json=_report("audit-node", generated_at="2027-01-01T00:00:00Z"),
+    )
+    assert future.status_code == 422 and "future" in future.text
+    wrong_host = client.post(audits, headers=admin_headers, json=_report("elsewhere"))
+    assert wrong_host.status_code == 422
+    client.post(
+        audits, headers=admin_headers, json=_report("audit-node", runner="Admin (elevated)")
+    )
+    assert "SYSTEM" in client.post(grant, headers=admin_headers, json=payload).text
+    clock.advance(seconds=1)
+    client.post(audits, headers=admin_headers, json=_report("audit-node", version="10.0.19045"))
+    wrong_image = client.post(grant, headers=admin_headers, json=payload)
+    assert wrong_image.status_code == 409 and "latest audit is of image" in wrong_image.text
+
+    clock.advance(seconds=1)
+    ok = client.post(audits, headers=admin_headers, json=_report("audit-node"))
+    assert ok.status_code == 201 and ok.json()["passed"] is True
+    made = client.post(grant, headers=admin_headers, json=payload)
+    assert made.status_code == 200, made.text
+    out = made.json()
+    assert out["user_code_allowed"] and out["user_code_ready"]
+    assert out["user_code_image"] == "11|10.0.22631"
+    history = client.get(audits, headers=admin_headers).json()
+    assert len(history) == 4 and history[0]["passed"] is True  # wrong-host refused
+    actions = client.get(
+        f"{API}/admin/audit-events", headers=admin_headers, params={"limit": 50}
+    ).text
+    for action in (
+        "node.exposure_audit_recorded",
+        "node.user_code_refused",
+        "node.user_code_changed",
+    ):
+        assert action in actions
+    assert "lab image reviewed" in actions
+
+
+def test_grant_needs_an_active_node_with_a_verified_appcontainer(
+    app, client, admin_headers, enroll, inventory_factory
+):
+    body, _, _ = enroll(inventory_factory(hostname="plain-node", appcontainer=False))
+    client.post(
+        f"{API}/admin/nodes/{body['node_id']}/exposure-audits",
+        headers=admin_headers,
+        json=_report("plain-node"),
+    )
+    refused = client.post(
+        f"{API}/admin/nodes/{body['node_id']}/user-code",
+        headers=admin_headers,
+        json={"allowed": True, "reason": "try"},
+    )
+    assert refused.status_code == 409 and "verified AppContainer" in refused.text
+
+
+def test_revocation_and_reimaging_stop_running_package_jobs(
+    app, client, student_headers, admin_headers, enroll, inventory_factory, uploaded_package
+):
+    digest, _ = uploaded_package
+    job = _package_job(app, client, student_headers, digest)
+    body, node, _ = _eligible(app, enroll, inventory_factory, "revoke-node")
+    [a] = _sync_reports(client, node, [], user_code=True)["assignments"]
+    revoked = client.post(
+        f"{API}/admin/nodes/{body['node_id']}/user-code",
+        headers=admin_headers,
+        json={"allowed": False, "reason": "incident 42"},
+    )
+    assert revoked.status_code == 200 and not revoked.json()["user_code_allowed"]
+    # The node cannot fetch more of the package or publish anything...
+    closure = client.get(
+        f"{API}/agent/jobs/{job['id']}/package", headers=node, params={"attempt": a["attempt"]}
+    )
+    assert closure.status_code == 409 and "not eligible" in closure.text
+    # ...and at its next sync the run is cancelled there and requeued for a fit node.
+    response = _sync_reports(client, node, [_report_line(job["id"], a["attempt"], "running")])
+    assert job["id"] in response["cancel"]
+    after = client.get(f"{API}/jobs/{job['id']}", headers=student_headers).json()
+    assert after["state"] == "queued"
+
+    # Reimaging: a new OS image in the inventory suspends eligibility, audited as SYSTEM.
+    body2, node2, _ = _eligible(app, enroll, inventory_factory, "reimage-node")
+    reimaged = inventory_factory(hostname="reimage-node", appcontainer=True).model_copy(
+        update={
+            "os": inventory_factory(hostname="reimage-node").os.model_copy(
+                update={"version": "10.0.26100"}
+            )
+        }
+    )
+    put = client.put(
+        f"{API}/agent/inventory",
+        headers=node2,
+        json={"inventory": reimaged.model_dump(mode="json")},
+    )
+    assert put.status_code == 204
+    state = client.get(f"{API}/admin/nodes/{body2['node_id']}", headers=admin_headers).json()
+    assert state["user_code_allowed"] is False
     events = client.get(
         f"{API}/admin/audit-events",
         headers=admin_headers,
-        params={"action": "node.user_code_changed"},
+        params={"action": "node.user_code_suspended"},
+    ).json()
+    assert events and events[0]["actor_type"] == "system"
+
+
+def test_switching_the_controller_flag_off_stops_running_package_jobs(
+    app, client, student_headers, enroll, inventory_factory, uploaded_package
+):
+    digest, _ = uploaded_package
+    job = _package_job(app, client, student_headers, digest)
+    _, node, _ = _eligible(app, enroll, inventory_factory, "flag-node")
+    [a] = _sync_reports(client, node, [], user_code=True)["assignments"]
+    app.state.settings = app.state.settings.model_copy(update={"user_code_enabled": False})
+    response = _sync_reports(client, node, [_report_line(job["id"], a["attempt"], "running")])
+    assert job["id"] in response["cancel"]
+    assert (
+        client.get(f"{API}/jobs/{job['id']}", headers=student_headers).json()["state"] == "queued"
     )
-    assert events.status_code == 200 and "lab image reviewed" in events.text
+
+
+def test_a_requeue_clears_the_previous_attempts_outputs(
+    app, client, student_headers, enroll, inventory_factory, uploaded_package
+):
+    digest, _ = uploaded_package
+    job = _package_job(app, client, student_headers, digest)
+    _, node, _ = _eligible(app, enroll, inventory_factory, "clear-node")
+    [a] = _sync_reports(client, node, [], user_code=True)["assignments"]
+    _publish(client, node, job["id"], a["attempt"], {"old.txt": b"attempt one"})
+    _sync_reports(
+        client,
+        node,
+        [_report_line(job["id"], a["attempt"], "failed", failure="infrastructure", error="lost")],
+    )
+    assert (
+        client.get(f"{API}/jobs/{job['id']}/outputs", headers=student_headers).json()["outputs"]
+        is None
+    )
+    [b] = _sync_reports(client, node, [], user_code=True)["assignments"]
+    _sync_reports(
+        client,
+        node,
+        [_report_line(job["id"], b["attempt"], "completed", package_result=_result(0))],
+    )
+    final = client.get(f"{API}/jobs/{job['id']}", headers=student_headers).json()
+    assert final["state"] == "succeeded"
+    assert (
+        client.get(f"{API}/jobs/{job['id']}/outputs", headers=student_headers).json()["outputs"]
+        is None
+    )
 
 
 def test_package_checkpoints_are_opaque_and_restored_on_reassignment(
@@ -1255,3 +1451,43 @@ def test_package_checkpoints_are_opaque_and_restored_on_reassignment(
     _, other, _ = _eligible(app, enroll, inventory_factory, "ckpt-node-2")
     [b] = _sync_reports(client, other, [], user_code=True)["assignments"]
     assert b["checkpoint"]["sha256"] == upload["sha256"]
+
+
+def test_grant_needs_an_active_node(app, client, admin_headers, enroll, inventory_factory):
+    body, _, _ = enroll(inventory_factory(hostname="maint-node", appcontainer=True))
+    node = body["node_id"]
+    client.post(
+        f"{API}/admin/nodes/{node}/exposure-audits",
+        headers=admin_headers,
+        json=_report("maint-node"),
+    )
+    moved = client.post(
+        f"{API}/admin/nodes/{node}/state",
+        headers=admin_headers,
+        json={"admin_state": "maintenance"},
+    )
+    assert moved.status_code == 200
+    refused = client.post(
+        f"{API}/admin/nodes/{node}/user-code",
+        headers=admin_headers,
+        json={"allowed": True, "reason": "try"},
+    )
+    assert refused.status_code == 409 and "only ACTIVE" in refused.text
+
+
+def test_a_grant_for_another_image_is_not_honoured(
+    app, client, student_headers, admin_headers, enroll, inventory_factory, uploaded_package
+):
+    """Defence in depth beside the automatic suspension: a stored grant whose image no
+    longer matches the node's never schedules work, and the node shows why."""
+    from udcs_controller.nodes.models import Node
+
+    digest, _ = uploaded_package
+    _package_job(app, client, student_headers, digest)
+    body, node, _ = _eligible(app, enroll, inventory_factory, "stale-grant-node")
+    with app.state.sessionmaker() as db:
+        db.get(Node, uuid.UUID(body["node_id"])).user_code_image = "11|10.0.19045"
+        db.commit()
+    assert _sync_reports(client, node, [], user_code=True)["assignments"] == []
+    shown = client.get(f"{API}/admin/nodes/{body['node_id']}", headers=admin_headers).json()
+    assert "differs from the audited" in shown["user_code_blocked"]
