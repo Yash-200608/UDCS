@@ -283,6 +283,18 @@ The probe's first runs on this PC found three false positives in the probe itsel
 | `tools/acceptance/m2_isolation_service_acceptance.ps1` | Service-path isolation self-test (unchanged) | ready |
 | `tools/acceptance/m3_exposure_audit.ps1 -AsSystem` | The exposure audit as LocalSystem, through a temporary scheduled task, using the repository's code (the installed service is not upgraded, stopped or reconfigured) | user context run here; **the `-AsSystem` path is untested** (this session is not elevated) |
 
+**Test evidence:**
+
+| Run | Result |
+|---|---|
+| Local full suite (this PC) | 432 passed, 19 skipped, 2 failed: the known intermittent catalog e2e tests |
+| CI run 46036973142, commit `dd7063e` | green on its second re-run: Windows full suite, PostgreSQL including migrations 0006 and 0007, lint |
+
+**Tech debt: the catalog e2e tests are intermittent.** `tests/e2e/test_job_pipeline.py` failed in 2 of 3 CI attempts on identical code, a different test each time.
+- The symptom is the in-process TLS controller not answering within the test client's timeout ("Server disconnected", `ReadTimeout`) under runner load.
+- The same tests failed on the unmodified previous commit on this PC.
+- They need their own investigation: a separate controller process, and longer client timeouts.
+
 **Outstanding acceptance requirements (none can be claimed yet):**
 - M1.5 pass 2 (start after reboot) on the original machine: **not run**.
 - Exposure audit as SYSTEM on the original machine, then on each real lab image: **not run**. No lab image has been validated.
