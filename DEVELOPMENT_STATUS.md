@@ -264,6 +264,11 @@ The probe's first runs on this PC found three false positives in the probe itsel
 - none of these: filesystem or registry write, sensitive data readable, process control, network.
 - **12 violations, all caused by the interactive context:** stop rights on 11 per-user services, and the student's desktop (hence A6).
 
+**Also measured, in CI** (GitHub `windows-latest` runner, run 46034655858): a UDCS AppContainer could **read the autologon password** in `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon\DefaultPassword`. That image stores the password in plain text, and the key is readable by AppContainers.
+- The audit flagged it as a violation, so that image could never be made eligible.
+- Lab PCs often use autologon, so this is a concrete reason the gate exists.
+- **Fix for lab images:** configure autologon so the password is not in that value (for example Sysinternals Autologon, which keeps it as an LSA secret), then re-audit.
+
 **3. Operator procedure.** [docs/operations/node-eligibility.md](docs/operations/node-eligibility.md).
 - It is enforced by the controller (migration 0007: `node_exposure_audits`, and the eligibility bound to an image and audit).
 - It is operated with `udcs admin nodes | audit-upload | audits | user-code allow|revoke`.

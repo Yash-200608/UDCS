@@ -61,6 +61,8 @@ A node runs researchers' packages only if **all** of these hold at the moment of
 
    The grant is bound to that image and audit.
 
+**Known image finding:** an autologon password stored in `Winlogon\DefaultPassword` is readable from a UDCS AppContainer (found on GitHub's windows-latest image). Store autologon credentials as an LSA secret instead (for example Sysinternals Autologon), then re-audit.
+
 ## Audit periodically
 
 - `udcs admin nodes` shows each node's eligibility. A grant that no longer applies shows `blocked:` with the reason.
