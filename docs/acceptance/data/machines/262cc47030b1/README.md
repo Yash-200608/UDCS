@@ -115,6 +115,18 @@ So at OS shutdown the Event Log's RPC interface is already gone. Before the fix,
 - Service RSS is within 1 MiB of its limit.
 - This is one Home-edition machine, not a lab image.
 
+## E1 re-check after replacing only `gpu_probe.py`: 2026-11-28, founder-run. **`e1_used_arrangements_ok` PASS.**
+
+Recorded in `m15-e1-recheck-cd02387.json`, separately from `m15-service-acceptance.json`, which this run did not touch. Only E1 ran: no reboot, no reinstall, no service restart (pid 25784 throughout).
+
+- **Installed probe:** c5dd16f's (`7cabd5f2...`), replaced by cd02387's (`37898437...`); the old file is kept as `gpu_probe.py.c5dd16f-backup`.
+- **Results on the RTX 3060**, all as `NT AUTHORITY\SYSTEM`:
+  - `service_process` OK, context 148 ms, kernel 20.0 ms;
+  - `service_child_worker` OK, context 72 ms, kernel 20.1 ms;
+  - `session_worker_system` OK, kernel 20.8 ms;
+  - `session_worker_user` fails ("probe produced no result"), as on every run and on the retired machine; excluded by design.
+- This closes the E1 gap from pass 1 run 2. The installed agent is now **c5dd16f plus the cd02387 `gpu_probe.py`**. No other file differs between those builds.
+
 **Scope.** This is new evidence for one machine, not proof of lab compatibility:
 - lab images are Pro, Education or Enterprise, often domain-joined and under Deep Freeze;
 - this PC runs Home edition;

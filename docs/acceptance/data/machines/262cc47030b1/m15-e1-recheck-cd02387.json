@@ -1,0 +1,88 @@
+{
+    "kind":  "m15-e1-recheck",
+    "note":  "Targeted re-check of E1 only, after replacing gpu_probe.py in the installed c5dd16f agent with the cd02387 version. Service lifecycle evidence is in m15-service-acceptance.json and was not re-run.",
+    "generated_at":  "2026-11-28T23:14:05.9336127+05:30",
+    "machine":  {
+                    "label":  "262cc47030b1",
+                    "edition":  "Microsoft Windows 11 Home Single Language",
+                    "edition_id":  "CoreSingleLanguage",
+                    "display_version":  "26H2",
+                    "build":  "10.0.26300.0",
+                    "build_ubr":  "26300.10075",
+                    "cpu":  "Intel(R) Core(TM) i5-14400F",
+                    "cores":  10,
+                    "logical":  16,
+                    "ram_gib":  31.7,
+                    "gpu":  [
+                                "NVIDIA GeForce RTX 3060 (32.0.16.2124)"
+                            ],
+                    "scope":  "one machine; not a lab image"
+                },
+    "installed_agent":  {
+                            "build":  "c5dd16f",
+                            "replaced":  "site\\udcs_agent\\diagnostics\\gpu_probe.py",
+                            "probe_sha256_before":  "7cabd5f2f65c9f180844276b86a393e7e4b4c1c488904cf21cd21011cac83976",
+                            "probe_sha256_after":  "378984372ae77fbcaf0fde50c39b88e0c6f4eec59f2543e310864f24a06e0e26",
+                            "probe_build":  "cd02387"
+                        },
+    "service":  {
+                    "pid":  25784,
+                    "same_process_throughout":  true,
+                    "restarted":  false
+                },
+    "e1_seconds":  3,
+    "e1_gpu_matrix":  {
+                          "host_session_id":  0,
+                          "started":  1795887844.1350853,
+                          "arrangements":  {
+                                               "service_process":  {
+                                                                       "session_id":  0,
+                                                                       "pid":  25784,
+                                                                       "account":  "NT AUTHORITY\\SYSTEM",
+                                                                       "device":  "NVIDIA GeForce RTX 3060",
+                                                                       "compute_capability":  "8.6",
+                                                                       "context_ms":  148.1,
+                                                                       "ok":  true,
+                                                                       "kernel_ms_median":  20.04
+                                                                   },
+                                               "service_child_worker":  {
+                                                                            "session_id":  0,
+                                                                            "pid":  21468,
+                                                                            "account":  "NT AUTHORITY\\SYSTEM",
+                                                                            "device":  "NVIDIA GeForce RTX 3060",
+                                                                            "compute_capability":  "8.6",
+                                                                            "context_ms":  72.2,
+                                                                            "ok":  true,
+                                                                            "kernel_ms_median":  20.12,
+                                                                            "exit_code":  0
+                                                                        },
+                                               "session_worker_system":  {
+                                                                             "session_id":  1,
+                                                                             "pid":  7236,
+                                                                             "account":  "NT AUTHORITY\\SYSTEM",
+                                                                             "device":  "NVIDIA GeForce RTX 3060",
+                                                                             "compute_capability":  "8.6",
+                                                                             "context_ms":  75.0,
+                                                                             "ok":  true,
+                                                                             "kernel_ms_median":  20.78,
+                                                                             "exit_code":  0
+                                                                         },
+                                               "session_worker_user":  {
+                                                                           "ok":  false,
+                                                                           "error":  "probe produced no result",
+                                                                           "exit_code":  1
+                                                                       }
+                                           },
+                          "finished":  1795887845.3757205,
+                          "protection_level_at_start":  "shared"
+                      },
+    "checks":  {
+                   "e1_used_arrangements_ok":  {
+                                                   "pass":  true,
+                                                   "detail":  {
+                                                                  "service_process":  true,
+                                                                  "service_child_worker":  true
+                                                              }
+                                               }
+               }
+}
