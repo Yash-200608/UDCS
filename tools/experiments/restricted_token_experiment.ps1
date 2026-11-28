@@ -114,7 +114,8 @@ runpy.run_path(r'$App\restricted_token_experiment.py', run_name='__main__')
     $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(-5)
     $trigger.EndBoundary = (Get-Date).AddMinutes(45).ToString('s')
     $settings = New-ScheduledTaskSettingsSet -DeleteExpiredTaskAfter (New-TimeSpan -Seconds 0) `
-        -ExecutionTimeLimit (New-TimeSpan -Minutes 40) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+        -ExecutionTimeLimit (New-TimeSpan -Minutes 40) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+        -Compatibility Win8  # ProcessTokenSidType needs a newer task schema (measured: 0x80041316 otherwise)
     $settings.StartWhenAvailable = $false
     $taskPrincipal = New-ScheduledTaskPrincipal -UserId 'NT AUTHORITY\SYSTEM' -LogonType ServiceAccount -RunLevel Highest -ProcessTokenSidType Unrestricted
     Register-ScheduledTask -TaskName $name -Action $action -Trigger $trigger -Settings $settings -Principal $taskPrincipal | Out-Null
