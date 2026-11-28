@@ -504,7 +504,14 @@ def main(argv=None) -> int:
         "variants": {},
     }
     capability = ac.capability_sid(ac.RUNTIME_CAPABILITY)
-    ac.workload_desktop(capability)  # created once, as in the agent
+    # Created once per process, as in the agent, but under a name of its own. The agent's
+    # "UDCSWorkloads" is opened, not refused, if it already exists (CreateWindowStationW
+    # without CWF_CREATE_ONLY): on a node where UDCSAgent runs, the grants below would then
+    # land on the installed service's live window station and desktop.
+    station = f"UDCSExperiment{os.getpid()}"
+    path = ac.workload_desktop(capability, name=station)
+    if ac._desktop_state.get("private_station") and not path.startswith(station + "\\"):
+        raise SystemExit(f"workload desktop {path!r} is not the experiment's own {station!r}")
     user_sid = own["user"]["sid"]
     groups = [g["sid"] for g in own["groups"] if "integrity" not in g["flags"]]
     variants = [("V0_production", [ADMINS], user_sid)]
