@@ -484,7 +484,34 @@ Not covered by this run:
 
 | Decision | Status / recommendation |
 |---|---|
-| D-4: workload token identity. As SYSTEM, the sandbox reads the signed-in student's `HKCU\Software`/`Environment`/`_Classes` through Windows' own ALL APPLICATION PACKAGES and `registryRead` grants | **open, blocks user code.** Recommendation: run workloads under a dedicated low-privilege local account (token via S4U logon from the service, no stored password), so the normal half of the access check denies student hives. Experiment first (needs an admin-created test account). Alternatives: a restricted token (complex, weaker), or accepting the read (not recommended) |
+| D-5 (first written as "D-4", which was already taken): workload token identity. As SYSTEM, the sandbox reads the signed-in student's `HKCU\Software`, `Environment` and `_Classes` through Windows' own ALL APPLICATION PACKAGES and `registryRead` grants | **Open, blocks user code.** Option B (restricted token: SYSTEM and Administrators deny-only) passed its feasibility experiment as LocalSystem; see below. Production validity depends on the real UDCSAgent service token, which is unmeasured. Option A (dedicated account through an S4U logon) is the fallback. |
+
+**D-5 Option B experiment (`tools/experiments/restricted_token_experiment.*`, 2026-11-28, dev PC; diagnostic only):**
+- **Method:**
+  - It drives the production launch path (`AppContainerIsolation`, `run_audit`, `run_selftest`) and swaps only three things: the `CreateRestrictedToken` `SidsToDisable` list, the grant SID, and the default DACL.
+  - Documented APIs only: `OpenProcessToken`, `CreateRestrictedToken(DISABLE_MAX_PRIVILEGE)`, `SetTokenInformation(TokenOwner, TokenDefaultDacl)`, `UpdateProcThreadAttribute(SECURITY_CAPABILITIES, ALL_APPLICATION_PACKAGES_POLICY)`, `CreateProcessAsUserW`, job objects, and `GetTokenInformation` on the child.
+- **LocalSystem run (scheduled task, session 0, run by the founder):**
+
+  | Variant | Student-hive registry findings | Probe / self-test / kill tree / CUDA |
+  |---|---|---|
+  | V0 production (control) | 1,015, all six explicit student targets readable (including `RecentDocs`, `Environment` values, `_Classes`) | all pass |
+  | V1 (SYSTEM and Administrators deny-only, default DACL names the grant SID) | **0**, and 0 exposure violations | all pass |
+  | V2 (every group deny-only) | — | child dies `0xC0000022`: `System32`/`ntdll` grant only TrustedInstaller, SYSTEM, Administrators and Users |
+
+  - Profile folders, credentials and `System32\config` were denied in every variant.
+  - Child token in V1: low integrity, only `SeChangeNotifyPrivilege`, 2 capabilities, user SID and Administrators deny-only.
+- **The same in the user context** (logon SID as the grant SID): V1 has 0 student findings and the self-test passes.
+- **My prediction was wrong:** I expected a SYSTEM token to lack `BUILTIN\Users`. The task-created SYSTEM token has it, plus `SERVICE`, `CONSOLE LOGON`, a logon SID and `NT SERVICE\Schedule`.
+- **Limits:**
+  1. **Not the service token.** The experiment ran from a scheduled task, not the UDCSAgent service. The service token's groups (`Users`? the `NT SERVICE\UDCSAgent` SID from `sc sidtype unrestricted`?) are unmeasured, and B needs both.
+  2. **Grant SID not valid for production.** The experiment's grant SID was `NT SERVICE\Schedule`, Task Scheduler's own SID. A task SID (`ProcessTokenSidType`) was refused for SYSTEM tasks (0x80041316).
+  3. **Snapshot changed.** The snapshot manifest changed during the SYSTEM run (audit runs left it unchanged). Cause not yet found.
+  4. **Broad groups still pass the normal half.** V1's child keeps `Users`, Authenticated Users and Everyone enabled, so for files those groups can read, only the AppContainer half (LPAC plus capabilities) stops it. That is the same exposure a dedicated account (option A) would have.
+- **Changes B would need in production:**
+  - add the SYSTEM SID to `SidsToDisable`;
+  - grants name the agent's service SID instead of SYSTEM;
+  - the default DACL also names the service SID (without it, the child fails with `0xC0000142`);
+  - the window station and desktop grant the service SID.
 | D-2: native session helper | open |
 | D-3: execution isolation | **decided**: native AppContainer now; MXC for 24H2+ nodes later (ADR 0001) |
 | Enabling user code | **not yet**: per-node admin eligibility is now built (ADR 0003); still needs ADR 0001 gate 2 (lab-image review), M1.5 pass 2 and an operator procedure for granting eligibility |
