@@ -391,6 +391,14 @@ Script guards:
 - The same tests failed on the unmodified previous commit on this PC.
 - They need their own investigation: a separate controller process, and longer client timeouts.
 
+**M1.5 open issues on machine 262cc47030b1, tracked separately (2026-11-28).** Each one is its own item; none needs another reboot of the acceptance PC unless it says so.
+- **I-1, E1 child workers on a build with the probe fix:** `tools/acceptance/m15_e1_recheck.ps1` replaces only `gpu_probe.py` in the installed agent and runs E1 alone, recording `machines/262cc47030b1/m15-e1-recheck-cd02387.json`. No reboot, no reinstall. *Prepared, not run.*
+- **I-2, service RSS near its limit:** 79.5 and 79.1 MiB against 80 MiB in both pass-1 runs, versus 55.6 MiB on the retired machine with older code. The cause is unknown; the limit is unchanged. A measurement task, not a re-run.
+- **I-3, disk interference:** the benchmark is inconclusive (see the M1.5 report).
+- **I-4, leftover AppContainer profiles:** 26 `udcs.*` profiles registered to the interactive user, from test and experiment runs, logged by Windows at sign-out. Test and experiment cleanup.
+- **I-5, uninstall hardening:** `uninstall-agent.ps1` uses PS 5.1 `Remove-Item -Recurse` (which can follow junctions; use the `rd /s /q` pattern). Its first run on 2026-11-28 failed with access denied on `libcrypto-3.dll` and succeeded when re-run, probably because a process still held the file. It also leaves the service's AppContainer profiles behind.
+- **I-6, representativeness:** lab image (ADR 0001 gate 2) and a second machine (ADR 0004 open item 1). They need hardware other than this PC.
+
 **Outstanding acceptance requirements (none can be claimed yet):**
 - M1.5 pass 1 and pass 2 on the designated acceptance machine (D-6): **not run**. The original machine's pass 2 is no longer possible; the machine is retired.
 - Exposure audit from the installed service on the designated machine, then on each real lab image: **not run**. No lab image has been validated.
