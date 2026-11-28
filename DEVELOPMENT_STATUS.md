@@ -2,6 +2,22 @@
 
 _Last updated: 2026-11-28. Development checkpoint on branch `feature/udcs-background-agent-m15`. This is **not** a release, and Milestone 1.5 is **not accepted**._
 
+## 2026-11-28: the original acceptance machine is retired
+
+**Verified fact (founder, 2026-11-28):** the original acceptance machine no longer exists. That was the i5-6500 with a GT 730, Windows 11 Pro Education build 22000, the UDCSAgent service installed, and the Pass 1 evidence recorded on it.
+
+The only machine is now this PC: Windows 11 **Home Single Language** build **26300**, i5-14400F, 32 GB, GeForce **RTX 3060**, UDCSAgent **not installed**.
+
+**Consequences:**
+- **M1.5 pass 2 can never be recorded against the existing pass 1.** `m15_service_acceptance.ps1 -AfterReboot` refuses to record anything except on the pass-1 machine, by design. M1.5 needs a fresh pass 1 and pass 2 on whichever machine is designated next (decision D-6).
+- **Existing evidence stays as recorded:** `docs/acceptance/data/m15-service-acceptance.json` and `m2-isolation-service.json`, the 2026-11-22 ADR 0001 gate 1 pass. They are now the record of a retired machine. Nothing in them was changed.
+- **Every "[measured] on the dev PC (GT 730, build 22000)" claim in the docs is historical** and can no longer be re-checked. This covers ADR 0001, the architecture README, `node-operating-model.md` and the M1.5 report. Kepler/CUDA 11 behaviour (the GT 730, CC 3.5) can no longer be tested.
+- **ADR 0004 open item 1 (build 22000) cannot be measured.** It is retargeted to "a second machine, ideally a real lab image", which is ADR 0001 gate 2 anyway. The build 22000 runbook and bundle become generic (`RUNBOOK-other-machine.md`).
+- **Representativeness limits of this PC:**
+  - **Home edition:** lab images are Pro, Education or Enterprise, often domain-joined and under Deep Freeze.
+  - **A modern GPU**, an RTX 3060 (CC 8.6), which is not the oldest hardware a lab may have.
+  - **Build 26300**, which is ≥ 26100. MXC's ProcessContainer therefore may be usable here (ADR 0001 rejected it only for build 22000). Unmeasured.
+
 ## Summary
 
 | Milestone | State |
@@ -376,8 +392,8 @@ Script guards:
 - They need their own investigation: a separate controller process, and longer client timeouts.
 
 **Outstanding acceptance requirements (none can be claimed yet):**
-- M1.5 pass 2 (start after reboot) on the original machine: **not run**.
-- Exposure audit as SYSTEM on the original machine, then on each real lab image: **not run**. No lab image has been validated.
+- M1.5 pass 1 and pass 2 on the designated acceptance machine (D-6): **not run**. The original machine's pass 2 is no longer possible; the machine is retired.
+- Exposure audit from the installed service on the designated machine, then on each real lab image: **not run**. No lab image has been validated.
 - A reviewed decision on each lab image's reachable items (pipes, objects, services): **not done**.
 - Packages executed by the installed service: **not done**. It runs older code; upgrading it is a separate, explicit step.
 
@@ -489,6 +505,7 @@ Not covered by this run:
 | D-3: execution isolation | **decided**: native AppContainer now; MXC for 24H2+ nodes later (ADR 0001) |
 | Enabling user code | **not yet**: per-node admin eligibility is now built (ADR 0003); still needs ADR 0001 gate 2 (lab-image review), M1.5 pass 2 and an operator procedure for granting eligibility |
 | D-4: power policy | open |
+| D-6: acceptance machine after the original was retired (2026-11-28) | **Open, founder's call. Recommendation:** designate this PC (build 26300, RTX 3060) as the M1.5 acceptance machine. Run a fresh pass 1 and pass 2 into a **new, machine-labelled evidence file**, keep the retired machine's files unchanged as history, and keep the M1.5 report explicit that it is one Home-edition PC, not a lab image. Needs the founder's approval to install UDCSAgent here (a system change) and a small change to `m15_service_acceptance.ps1` (today it refuses while pass-1 evidence exists, and its only override replaces that file). |
 | Repository license | none chosen |
 | Differentiator versus HTCondor | needs to be written before M3 |
 
@@ -530,7 +547,7 @@ Not covered by this run:
 
     `node_agent/tests/test_interpreter_flags.py` scans every `[python, "-I", ...]` argv and fails without `-B`. **Not covered:** the service host itself still starts as `python.exe -I run_service.py`, without `-B`, so the agent process still writes `.pyc` into its own install folder (SYSTEM- and Administrators-only, so this is an integrity drift, not an escalation path). Changing that is an installer/binPath change and is left for a deliberate decision, because the installed service must not be modified.
   - **Open:**
-    1. **One machine:** measured only on build 26300; the original machine is build 22000.
+    1. **One machine:** measured only on build 26300. The build 22000 machine was retired on 2026-11-28, so a second machine, ideally a lab image, is needed.
     2. **Owner rights untested:** the child's token owner is SYSTEM, which is deny-only. Whether its files carry owner rights is untested.
     3. **Constraint:** the child keeps the service SID and the logon SID enabled. Production B must therefore never grant the service SID on agent-private data, because only the AppContainer check would then protect it.
     4. ~~Narrower variant untested~~: measured in the narrow-variant service run below.
@@ -556,8 +573,8 @@ Not covered by this run:
   - Child token: only Everyone, `BUILTIN\Users` and the service SID enabled; the user SID is deny-only.
   - The service was removed and no folder was left (founder verified both).
   - V5 is now measured twice in a real LocalSystem service on this build.
-- **Build 22000 re-measurement prepared (not run):**
-  - **Bundle:** `tools/experiments/make_d5_bundle.ps1` packages a staging of the current commit with the three scripts and `tools/experiments/RUNBOOK-build22000.md`. The runbook covers the read-only `sc qsidtype` / `sc qc` checks, the V0/V1/V5 temporary-service run, cleanup checks and a privacy note.
+- **Second-machine re-measurement prepared (not run; first prepared for the build 22000 machine, since retired):**
+  - **Bundle:** `tools/experiments/make_d5_bundle.ps1` packages a staging of the current commit with the three scripts and `tools/experiments/RUNBOOK-other-machine.md`. The runbook covers the read-only `sc qsidtype` / `sc qc` checks, the V0/V1/V5 temporary-service run, cleanup checks and a privacy note.
   - **Window-station fix:** the experiment now uses its own window station name. The agent's `UDCSWorkloads` window station is opened, not refused, if it already exists, so on a node running UDCSAgent the experiment would have added ACEs to the installed service's live window station and desktop.
   - **Verified from an extracted copy outside the repository (user context):** V0 and V5 ran; V5 had 0 student findings and passed the self-test (21/21), the kill tree and CUDA, with the known `WinSta0\Default` user-context violation.
   - **Production note (not fixed):** `workload_desktop` would likewise adopt a pre-existing `UDCSWorkloads` window station. **Unverified assumption:** only privileged identities can create a window station in session 0 before the agent does. Other service accounts in session 0 may also be able to, and that is not measured. Until it is, treat this as a hardening item (`CWF_CREATE_ONLY`, and refuse if the name is taken) for the implementation of ADR 0004.

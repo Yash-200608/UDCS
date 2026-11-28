@@ -22,7 +22,7 @@ The sandbox token comes from the agent, LocalSystem. Today's workload token keep
 
 | Option | Mechanism | Assessment |
 |---|---|---|
-| **A. Dedicated low-privilege account** | Workloads run as a separate local account. The agent needs its credentials or an S4U logon. | It works with only the normal half, but it adds an account to create, rotate and police per node. Lab images and Deep Freeze may reset or forbid it, and it needs a password or LSA logon right on every node. **This is the fallback if B fails on build 22000 or on lab images.** |
+| **A. Dedicated low-privilege account** | Workloads run as a separate local account. The agent needs its credentials or an S4U logon. | It works with only the normal half, but it adds an account to create, rotate and police per node. Lab images and Deep Freeze may reset or forbid it, and it needs a password or LSA logon right on every node. **This is the fallback if B fails on a second machine or on lab images.** |
 | **B. Restricted SYSTEM token, service-SID grants** (chosen) | `CreateRestrictedToken` marks SYSTEM and every group except an allowlist deny-only. Agent-made grants name the agent's service SID (`NT SERVICE\UDCSAgent`) instead of SYSTEM. | Documented APIs only, no account, no credentials, no policy change. Measured working (below). Its safety rests on two invariants, given under "Invariants". |
 | C. Change the hive ACLs | Remove the ALL APPLICATION PACKAGES / `registryRead` ACEs from user hives. | **Rejected:** a system-wide ACL change to Windows-owned objects, undone by profile creation and updates, and off-limits for UDCS. |
 | D. Drop `registryRead` | Run LPAC without it. | **Rejected:** Python does not start (`0xC0000022`, measured). |
@@ -85,7 +85,7 @@ The agent refuses to launch a workload, raising `IsolationUnavailable`, and its 
 
 ## Open items (must be closed before implementation is declared done)
 
-1. **Build 22000 (the acceptance machine) is unmeasured.** Its SYSTEM token groups, and whether Users + Everyone still suffice for the loader, are unknown. This decides between B and A.
+1. **Only one machine is measured** (build 26300, Home edition). The build 22000 machine this item first named was retired on 2026-11-28 and cannot be measured. A second machine, ideally a real lab image (Pro/Education/Enterprise, domain join, Deep Freeze), must confirm the SYSTEM token groups and that Users + Everyone suffice for the loader. This decides between B and A, and belongs with ADR 0001 gate 2.
 2. **Owner rights are untested.** The child's token owner is SYSTEM, which is deny-only, so the files the child creates are owned by a SID the child cannot use. This has to be measured: whether the child can still read and write its own outputs in every case (it could in the self-test), and whether the agent can always read and delete them afterwards. The alternative, the service SID as owner, gives the child `WRITE_DAC` on its own files. That is not obviously worse, but it is unmeasured.
 3. **Why Everyone is required is unexplained.** Startup fails without it (V3, V6), and the object that needs it has not been identified. A loader trace (Process Monitor on the failing variant) should name it, so that the dependency is understood rather than empirical.
 4. **Lab images:** Deep Freeze, domain join, Office and campus software. The allowlist makes extra groups deny-only by design, but this is unmeasured.
@@ -96,12 +96,12 @@ The agent refuses to launch a workload, raising `IsolationUnavailable`, and its 
 - **Implementation sketch.** One token builder in `winplat/appcontainer.py` (allowlist in, `SidsToDisable` out), a `workload_grant_sid()` that resolves and validates the service SID, and `workloads/isolation.py` switched from `current_user_sid()` to the grant SID for workload grants. `current_user_sid()` keeps its meaning, because `jobs.running_as_local_system` depends on it. Expected size: small, about 100–200 lines plus tests.
 - **Testing.** Unit tests cover the allowlist builder and the fail-closed rules. CI runs as an elevated administrator, not as a service, so CI cannot exercise B end to end. The end-to-end measurement stays a founder-run temporary-service run, plus the installed-service acceptance on the original machine. Proposed: a CI job that hosts the self-test in a temporary service, as the experiment does, if the runner allows it.
 - **Acceptance.** This changes the sandbox token that `m2_isolation_service_acceptance.ps1` gate 1 passed on 2026-11-22. That evidence stays as recorded, and the new token needs its own installed-service run. It does not alter Pass 1 or Pass 2 of M1.5.
-- **If B fails on build 22000 or on a lab image,** fall back to option A rather than weakening the token (for example, by re-enabling SYSTEM).
+- **If B fails on a second machine or on a lab image,** fall back to option A rather than weakening the token (for example, by re-enabling SYSTEM).
 
 ## Rollout and verification (proposed order)
 
-1. **Read-only on the original machine, with the founder's approval:** `sc qsidtype UDCSAgent`, expected to report `UNRESTRICTED`. This changes nothing.
-2. **Re-measure V0/V5 on build 22000** with the experiment's temporary service, which is a separate service; the installed UDCSAgent is not touched. This needs the founder's approval to run there.
+1. **On the designated acceptance machine (decision D-6), after UDCSAgent is installed:** a read-only `sc qsidtype UDCSAgent`, expected to report `UNRESTRICTED`.
+2. **Re-measure V0/V5 on a second machine, ideally a lab image,** with the portable bundle (`tools/experiments/make_d5_bundle.ps1`, `RUNBOOK-other-machine.md`) and the experiment's temporary service. Any installed UDCSAgent is not touched. This needs the machine owner's approval. Until it is done, B rests on one machine.
 3. **Implement** behind the existing switches, with tests, if step 2 passes.
 4. Run the exposure audit and isolation self-test from the **installed** service, on both machines.
 5. Run gate 2 (the lab-image audit) under the new token.

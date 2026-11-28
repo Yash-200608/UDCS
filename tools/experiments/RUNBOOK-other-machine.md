@@ -1,4 +1,8 @@
-# Runbook: ADR 0004 / D-5 re-measurement on the build 22000 acceptance machine
+# Runbook: ADR 0004 / D-5 re-measurement on another machine (a second PC or a lab image)
+
+This was first written for the build 22000 acceptance machine, which was retired on 2026-11-28. It applies to any other Windows machine.
+
+If UDCSAgent is not installed there, skip the `UDCSAgent` checks in step 1: the experiment does not need the agent.
 
 **Diagnostic only.** The results are never acceptance evidence and must not go into `docs/acceptance/data`.
 
@@ -71,6 +75,6 @@ Bring back the console output and the result file, `%LOCALAPPDATA%\UDCS\diagnost
 
 ## What decides the outcome (ADR 0004, open item 1)
 
-- **B holds on build 22000** if V5 shows 0 student-hive findings and 0 violations, the self-test passes 21/21, the kill tree passes, and the child token has only Users, Everyone and the service SID enabled.
-- **CUDA:** on a GT 730 a CUDA failure in *both* the sandbox and the host is a driver matter, not a token matter. Compare it with V0.
+- **B holds on that machine** if V5 shows 0 student-hive findings and 0 violations, the self-test passes 21/21, the kill tree passes, and the child token has only Users, Everyone and the service SID enabled.
+- **CUDA:** on an old GPU (for example Kepler), a CUDA failure in *both* the sandbox and the host is a driver matter, not a token matter. Compare it with V0.
 - **B fails** if V5 does not start (for example `0xC0000022`) while V0 does, or if V5 shows any student finding. In that case ADR 0004 falls back to option A, the dedicated account.

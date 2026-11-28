@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
   Build a portable bundle of the D-5 / ADR 0004 restricted-token experiment, to run on
-  another machine (the build 22000 acceptance machine) without a repository checkout.
+  another machine (a second PC or a lab image) without a repository checkout.
 
 .DESCRIPTION
   Run unelevated on the dev PC, from a clean working tree:
@@ -11,7 +11,7 @@
       stage\                                      package_agent.py staging of this commit
       tools\experiments\restricted_token_experiment.ps1/.py
       tools\acceptance\m3_exposure_audit.ps1      (its hardened helpers are loaded by the above)
-      RUNBOOK-build22000.md, BUNDLE.txt           (commit, file count, SHA-256 of every file)
+      RUNBOOK-other-machine.md, BUNDLE.txt           (commit, file count, SHA-256 of every file)
 
   Nothing is installed or changed on either machine. It prints the zip's SHA-256, to be
   compared on the target before extracting.
@@ -46,7 +46,7 @@ foreach ($rel in @(
     New-Item -ItemType Directory -Force -Path (Split-Path $dest) | Out-Null
     Copy-Item -LiteralPath (Join-Path $Repo $rel) -Destination $dest
 }
-Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'RUNBOOK-build22000.md') -Destination $Out
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'RUNBOOK-other-machine.md') -Destination $Out
 
 $files = Get-ChildItem -LiteralPath $Out -Recurse -File | Sort-Object FullName
 $lines = foreach ($f in $files) {
