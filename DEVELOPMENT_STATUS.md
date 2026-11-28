@@ -560,7 +560,7 @@ Not covered by this run:
   - **Bundle:** `tools/experiments/make_d5_bundle.ps1` packages a staging of the current commit with the three scripts and `tools/experiments/RUNBOOK-build22000.md`. The runbook covers the read-only `sc qsidtype` / `sc qc` checks, the V0/V1/V5 temporary-service run, cleanup checks and a privacy note.
   - **Window-station fix:** the experiment now uses its own window station name. The agent's `UDCSWorkloads` window station is opened, not refused, if it already exists, so on a node running UDCSAgent the experiment would have added ACEs to the installed service's live window station and desktop.
   - **Verified from an extracted copy outside the repository (user context):** V0 and V5 ran; V5 had 0 student findings and passed the self-test (21/21), the kill tree and CUDA, with the known `WinSta0\Default` user-context violation.
-  - **Production note (not fixed):** `workload_desktop` would likewise adopt a pre-existing `UDCSWorkloads` window station. Only SYSTEM or an administrator can create one in session 0, so this is hardening (`CWF_CREATE_ONLY`) rather than an open hole.
+  - **Production note (not fixed):** `workload_desktop` would likewise adopt a pre-existing `UDCSWorkloads` window station. **Unverified assumption:** only privileged identities can create a window station in session 0 before the agent does. Other service accounts in session 0 may also be able to, and that is not measured. Until it is, treat this as a hardening item (`CWF_CREATE_ONLY`, and refuse if the name is taken) for the implementation of ADR 0004.
 - **Changes B would need in production:**
   - add the SYSTEM SID to `SidsToDisable`;
   - grants name the agent's service SID instead of SYSTEM;
