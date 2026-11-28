@@ -25,6 +25,18 @@ from udcs_agent.config import default_data_dir
 from udcs_shared.logs import configure_logging
 
 SERVICE_NAME = "UDCSAgent"
+logger = logging.getLogger("udcs.agent")
+
+
+def _event_log(message: str) -> None:
+    """Best-effort Application-log entry. At OS shutdown the Event Log service may already
+    be stopping. An exception escaping SvcDoRun makes pywin32 report SERVICE_STOPPED with a
+    non-zero code, which turns a clean stop into a service failure (suspected cause of SCM
+    event 7024 on 2026-11-28). The failure is logged to agent.log, not swallowed."""
+    try:
+        servicemanager.LogInfoMsg(message)
+    except Exception:  # any event-log failure; recorded below, never re-raised
+        logger.warning("event log write failed: %s", message, exc_info=True)
 
 
 class UdcsAgentService(win32serviceutil.ServiceFramework):
@@ -61,14 +73,15 @@ class UdcsAgentService(win32serviceutil.ServiceFramework):
     def SvcDoRun(self) -> None:
         data_dir = Path(os.environ.get("UDCS_AGENT_DATA_DIR") or default_data_dir())
         configure_logging("INFO", json_output=True, log_file=data_dir / "logs" / "agent.log")
-        servicemanager.LogInfoMsg(f"{SERVICE_NAME} starting (pid {os.getpid()})")
+        _event_log(f"{SERVICE_NAME} starting (pid {os.getpid()})")
         self._app = AgentApp(data_dir, stop=self._stop, require_secure_data_dir=True)
         try:
             code = self._app.run()
         except Exception:
-            logging.getLogger("udcs.agent").exception("agent crashed")
+            logger.exception("agent crashed")
             code = 1
-        servicemanager.LogInfoMsg(f"{SERVICE_NAME} stopped (exit {code})")
+        _event_log(f"{SERVICE_NAME} stopped (exit {code})")
+        logger.info("service run returning", extra={"exit_code": code})
         if code != EXIT_OK:
             # Exiting without reporting SERVICE_STOPPED is treated by the SCM as a failure,
             # which triggers the configured recovery (restart).

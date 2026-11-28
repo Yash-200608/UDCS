@@ -56,8 +56,17 @@ The JSON records this attempt exactly as the script wrote it.
 - **A real defect found at the same reboot: the shutdown is not clean.**
   - At 20:30:59 the SCM logged event 7024: "The UDCS Node Agent service terminated with the following service-specific error: 0x20000001".
   - There is no "UDCSAgent stopped" entry, whereas pass 1's manual stop logged "stopped (exit 0)".
-  - The cause is **not yet known**. It needs `agent.log`, which only SYSTEM and Administrators can read.
-  - M1.5 should not be accepted with this open, because workloads must checkpoint and stop cleanly when the PC shuts down.
+  - **`agent.log`, read elevated by the founder:** `15:00:59.265Z "agent stopped", "shutdown_ms": 16, "reason": "stop requested"`. So the agent itself stopped cleanly, in the same second as the SCM error.
+  - **Suspected cause (consistent, not confirmed):**
+    - after `run()` returns, `SvcDoRun` writes "stopped" to the Application log;
+    - that entry is missing;
+    - pywin32 documents that an exception escaping `SvcRun` makes it report SERVICE_STOPPED with a non-zero code;
+    - the Event Log service is presumably already stopping at shutdown.
+    - `0x20000001` is not in pywin32's message table (its codes are `0xC000000x`), so the code itself is unexplained.
+  - **Fix (implemented and unit-tested; not yet verified at a real shutdown):** the event-log writes are best-effort, any failure is logged to `agent.log`, and a final "service run returning" line is logged. `node_agent/tests/test_service_windows.py` fails without the fix.
+  - **To verify:** upgrade the installed agent, which needs approval, reboot, then check that SCM records no 7024 and that `agent.log` shows "service run returning", plus "event log write failed" if the hypothesis is right.
+  - **Pass 2 now checks this as `clean_shutdown_before_boot`:** no SCM 7023/7024/7031/7034 for UDCSAgent between the end of pass 1 and the boot. On today's events it finds exactly this 7024 and excludes pass 1's deliberate crash test (7031 at 20:17:56).
+  - M1.5 cannot be accepted while this is open: workloads must checkpoint and stop cleanly when the PC shuts down.
 
 **Pass 2, attempt 2: not run yet.**
 

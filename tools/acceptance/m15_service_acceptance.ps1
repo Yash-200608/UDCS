@@ -209,7 +209,11 @@ if (-not $AfterReboot) {
 
     # -- 8. prepare the reboot check -----------------------------------------------------
     Start-Service $Service
-    Set-Field $report 'reboot_marker' ([ordered]@{ boot_before = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToString('o') })
+    # pass1_finished bounds pass 2's shutdown check, so pass 1's own deliberate crash test
+    # (Stop-Process above) is never mistaken for a shutdown failure.
+    Set-Field $report 'reboot_marker' ([ordered]@{
+        boot_before = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToString('o')
+        pass1_finished = (Get-Date).ToString('o') })
     Save-Report $report
     Write-Host "`nPass 1 done. Reboot this PC, sign in, then run:  .\m15_service_acceptance.ps1 -AfterReboot"
     exit 0
@@ -231,6 +235,7 @@ if ($report.checks.starts_after_reboot -or $report.checks.helper_started_at_logo
     $attempts = @($report.pass2_attempts | Where-Object { $_ })
     $attempts += [ordered]@{
         finished = $report.finished; starts_after_reboot = $report.checks.starts_after_reboot
+        clean_shutdown_before_boot = $report.checks.clean_shutdown_before_boot
         helper_started_at_logon = $report.checks.helper_started_at_logon }
     Set-Field $report 'pass2_attempts' $attempts
 }
@@ -249,6 +254,16 @@ if ($started) { $startedAfterS = [math]::Round(($started - $boot).TotalSeconds, 
 Check $report 'starts_after_reboot' ($rebooted -and ($svc.Status -eq 'Running') -and ($null -ne $started) -and ($started -gt $boot) -and ($null -ne $fresh)) @{
     rebooted = $rebooted; status = "$($svc.Status)"; waited_for_running_s = $waitedS
     service_started_after_boot_s = $startedAfterS; governor_status_fresh = ($null -ne $fresh) }
+# The service must also have STOPPED cleanly when the PC shut down for this reboot: workloads
+# checkpoint and stop on shutdown. SCM 7023/7024 (stopped with an error), 7031/7034
+# (terminated unexpectedly) for UDCSAgent between the end of pass 1 and this boot = FAIL.
+$windowStart = $boot.AddMinutes(-10)  # records made before pass1_finished existed
+if ($report.reboot_marker.pass1_finished) { $windowStart = [datetime]$report.reboot_marker.pass1_finished }
+$scmFailures = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Service Control Manager'; Id = 7023, 7024, 7031, 7034; StartTime = $windowStart; EndTime = $boot } -ErrorAction SilentlyContinue |
+    Where-Object { $_.Message -match 'UDCS Node Agent' })
+Check $report 'clean_shutdown_before_boot' ($scmFailures.Count -eq 0) @{
+    window_start = $windowStart.ToString('o'); boot = $boot.ToString('o'); scm_failures = $scmFailures.Count
+    events = @($scmFailures | ForEach-Object { [ordered]@{ time = $_.TimeCreated.ToString('o'); id = $_.Id; message = ($_.Message -replace '\s+', ' ') } }) }
 $helper = Get-CimInstance Win32_Process -Filter "Name='pythonw.exe'" | Where-Object { $_.CommandLine -like '*run_helper.py*' }
 Check $report 'helper_started_at_logon' ($null -ne $helper) @{ helper_sessions = @($helper | ForEach-Object { (Get-Process -Id $_.ProcessId).SessionId }) }
 Set-Field $report 'finished' (Get-Date).ToString('o')
