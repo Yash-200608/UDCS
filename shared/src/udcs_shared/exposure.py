@@ -85,11 +85,29 @@ _PROCESS_ACCESS_VIOLATION = {"terminate", "vm_read", "vm_write", "dup_handle", "
 _SERVICE_ACCESS_VIOLATION = {"stop", "change_config", "write_dac"}
 
 
+_SENSITIVE_REGISTRY = ("hklm\\sam\\sam", "hklm\\security")
+# A real user's hive (and its _Classes hive) is HKU\S-1-5-21-<domain>-<rid>: a SID prefix,
+# not a path component. Matching it as a component missed every student hive (measured
+# 2026-11-28: HKU\<student>\Software, \Environment and _Classes were readable and passed).
+_USER_HIVE_PREFIX = "hku\\s-1-5-21-"
+
+
+def sensitive_registry(target: str) -> bool:
+    """Judged here as well as in the probe, so a report whose probe mislabelled a finding
+    (or was edited) is still failed by whoever re-judges it."""
+    low = target.lower()
+    return low.startswith(_USER_HIVE_PREFIX) or any(
+        low == s or low.startswith(s + "\\") for s in _SENSITIVE_REGISTRY
+    )
+
+
 def finding_violation(f: ExposureFinding) -> str | None:
     """Why this one finding is a hard failure, or None if it is only for review."""
     where = f"{f.category.value} {f.target}"
     if f.category in (Category.FILESYSTEM, Category.REGISTRY) and f.access in _WRITE_ACCESS:
         return f"writable: {where} ({f.access})"
+    if f.category == Category.REGISTRY and sensitive_registry(f.target):
+        return f"student or account data readable: {where} ({f.access})"
     if f.category in (Category.FILESYSTEM, Category.REGISTRY) and f.sensitive:
         return f"sensitive data readable: {where} ({f.access})"
     if f.category == Category.PROCESS and f.access in _PROCESS_ACCESS_VIOLATION:

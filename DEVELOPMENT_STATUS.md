@@ -315,7 +315,20 @@ Verified unelevated:
     - **Interactive-user audit, before → after:** 12 → 1 violations. The remaining one is `WinSta0\Default`, which is absent in session 0.
     - **Isolation self-test:** passes, and CUDA still initialises in the sandbox.
     - **Side effect:** under LPAC, `LookupPrivilegeNameW` fails, so privilege names now come from fixed LUIDs.
-    - **Pending:** a LocalSystem re-run.
+    - **LocalSystem re-run (2026-11-28, commit 644d18f, founder-run):**
+      - All four cross-checks passed. The identity reads `NT AUTHORITY\SYSTEM`, with no host or user names in the summary.
+      - Service findings are gone and one pipe remains; the summary reported **no violations**.
+- **That was a FALSE PASS, found while reviewing the reachable items.**
+  - **What the sandbox could read:** keys in the signed-in student's own hive (`HKU\S-1-5-21-…-1001\Software`, `\Environment`, `\Control Panel`, and 500 keys of the `_Classes` hive).
+  - **Why the audit missed it:** the sensitivity rule `HKU\S-1-5-21` was matched as a path component, but a user hive is `HKU\S-1-5-21-<domain>-<rid>`, so it never matched. Every earlier run, standard AppContainer included, had the same blind spot.
+  - **Why it is readable:** Windows grants `ReadKey` on every user's `HKCU\Software` and `HKCU\Environment` (inherited down to, for example, `Explorer\RecentDocs`) to both ALL APPLICATION PACKAGES and the `registryRead` capability SID. The normal half of the access check passes because the sandbox token's user is SYSTEM.
+  - **Fixes:**
+    - the probe rule is now a SID prefix;
+    - the shared verdict, which the controller uses to re-judge uploads, classifies `HKU\S-1-5-21-*`, `HKLM\SAM\SAM` and `HKLM\SECURITY` from the target itself instead of trusting the probe's flag;
+    - a pinned unit test covers it.
+  - **Re-judged:** 506 violations.
+  - **Evidence folder:** the false-pass summary was removed from `docs/acceptance/data`.
+  - **Open, needs a design decision:** no AppContainer configuration fixes this, because the exposure comes from SYSTEM being the token user. See "Decisions awaiting the founder".
   - The same 11 appear in the interactive-user run. The user run's 12th finding, `WinSta0\Default`, is absent in session 0 as expected.
   - Impact: user code could stop services of the logged-on student, which breaks the "students have priority" rule. This looks like a property of the Windows 11 image, not of this PC; mitigation is undecided.
 - **Two bugs found by this run, fixed:**

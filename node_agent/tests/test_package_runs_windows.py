@@ -466,6 +466,7 @@ def test_the_exposure_audit_probe_runs_in_appcontainer_and_finds_no_hard_leaks(t
             "service controllable",
             "interactive session",
             "sensitive data readable: registry",
+            "student or account data readable",  # HKU\S-1-5-21-* via registryRead grants
         )
         assert all(v.startswith(context) for v in found), found
 
@@ -487,3 +488,18 @@ def test_the_audit_flags_a_readable_autologon_password_as_a_violation():
         sensitive=True,
     )
     assert finding_violation(finding).startswith("sensitive data readable")
+
+
+def test_a_readable_student_hive_fails_even_when_the_probe_did_not_flag_it():
+    """The 2026-11-28 false pass: the SYSTEM-run sandbox read HKU\\<student>\\Software and
+    the student's _Classes hive, but the rule matched HKU\\S-1-5-21 as a path component,
+    so nothing was flagged. The verdict now classifies the target itself."""
+    from udcs_shared.exposure import ExposureFinding, finding_violation, sensitive_registry
+
+    sid = "S-1-5-21-919810400-877296548-1318496414-1001"
+    for target in (rf"HKU\{sid}\Software", rf"HKU\{sid}\Environment", rf"HKU\{sid}_Classes\zune"):
+        finding = ExposureFinding(category="registry", target=target, access="read")
+        assert finding_violation(finding).startswith("student or account data readable"), target
+    for target in (r"HKU\S-1-5-18", r"HKU\.DEFAULT", r"HKLM\SAM", r"HKLM\SOFTWARE\Classes"):
+        assert not sensitive_registry(target), target
+    assert sensitive_registry(r"HKLM\SAM\SAM\Domains") and sensitive_registry(r"HKLM\SECURITY")

@@ -203,7 +203,8 @@ def build_plan(data_dir: Path, scratch: Path, profile_folder: str | None) -> dic
             ["HKCU", "", 2],
         ],
         # HKLM\SAM itself is world-readable by design; the account database is SAM\SAM.
-        "sensitive_reg": ["HKLM\\SAM\\SAM", "HKLM\\SECURITY", "HKU\\S-1-5-21"],
+        # HKU\S-1-5-21- is a SID prefix: every real user's hive and its _Classes hive.
+        "sensitive_reg": ["HKLM\\SAM\\SAM", "HKLM\\SECURITY", "HKU\\S-1-5-21-"],
         "sensitive_values": [
             [
                 "HKLM",

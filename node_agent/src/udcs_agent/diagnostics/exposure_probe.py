@@ -222,8 +222,11 @@ class Probe:
                     return
                 self.count("registry")
                 name = f"{hive}\\{path}" if path else hive
+                low = name.lower()
+                # A rule ending in "-" is a SID prefix (HKU\S-1-5-21-...), not a component.
                 is_sensitive = any(
-                    name.lower() == s or name.lower().startswith(s + "\\") for s in sensitive
+                    low == s or low.startswith(s + "\\") or (s.endswith("-") and low.startswith(s))
+                    for s in sensitive
                 )
                 # An empty subkey returns the predefined root handle itself, without an
                 # access check (measured: a false "writable HKU/HKCU"). Roots are only
