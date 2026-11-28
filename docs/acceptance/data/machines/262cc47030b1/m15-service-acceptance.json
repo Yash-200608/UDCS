@@ -87,7 +87,36 @@
                                                         "stop_s":  0.26,
                                                         "workload_processes_left":  0
                                                     }
-                                     }
+                                     },
+                   "starts_after_reboot":  {
+                                               "pass":  true,
+                                               "detail":  {
+                                                              "rebooted":  true,
+                                                              "waited_for_running_s":  69.5303442,
+                                                              "governor_status_fresh":  true,
+                                                              "status":  "Running",
+                                                              "service_started_after_boot_s":  132.2
+                                                          }
+                                           },
+                   "clean_shutdown_before_boot":  {
+                                                      "pass":  true,
+                                                      "detail":  {
+                                                                     "events":  [
+
+                                                                                ],
+                                                                     "boot":  "2026-11-28T21:57:00.5000000+05:30",
+                                                                     "window_start":  "2026-11-28T21:33:09.0243026+05:30",
+                                                                     "scm_failures":  0
+                                                                 }
+                                                  },
+                   "helper_started_at_logon":  {
+                                                   "pass":  true,
+                                                   "detail":  {
+                                                                  "helper_sessions":  [
+                                                                                          1
+                                                                                      ]
+                                                              }
+                                               }
                },
     "e1_gpu_matrix":  {
                           "host_session_id":  0,
@@ -125,5 +154,6 @@
     "reboot_marker":  {
                           "boot_before":  "2026-11-28T20:31:10.5000000+05:30",
                           "pass1_finished":  "2026-11-28T21:33:09.0243026+05:30"
-                      }
+                      },
+    "finished":  "2026-11-28T21:59:14.1770836+05:30"
 }

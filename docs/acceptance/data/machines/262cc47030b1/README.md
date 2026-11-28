@@ -93,7 +93,27 @@ This is `m15-service-acceptance.json`. The previous report was kept by `-Replace
 - **Harness weakness exposed:** `e1_completed` passed although the children failed. Pass 1 now also records `e1_used_arrangements_ok`, which requires `service_process` and `service_child_worker` to succeed.
 - **Service overhead** is again within 1 MiB of the limit (79.1 MiB): consistent, and still unexplained.
 
-**Pass 2 for run 2: not run yet.** It needs a reboot, and its main purpose is to verify the shutdown fix on this build.
+## Pass 2 for run 2: 2026-11-28 21:59, founder-run, after a reboot (boot 21:57:00). **All 3 checks PASS.**
+
+| Check | Result |
+|---|---|
+| `starts_after_reboot` | Running; the SCM started it on its own **132.2 s after boot** (delayed auto-start); the harness waited 69.5 s for it; fresh governor status |
+| `clean_shutdown_before_boot` | **0** SCM failures (7023/7024/7031/7034) for UDCSAgent between the end of pass 1 (21:33:09) and the boot |
+| `helper_started_at_logon` | helper running in session 1 |
+
+**The shutdown defect is fixed and its cause confirmed** (`agent.log`, read elevated by the founder):
+- `16:26:48.558Z` "agent stopped" (16 ms);
+- `16:26:48.563Z` WARNING "event log write failed: UDCSAgent stopped (exit 0)" with `pywintypes.error: (1717, 'RegisterEventSource/ReportEvent', 'The interface is unknown.')`;
+- `16:26:48.565Z` "service run returning", exit code 0.
+
+So at OS shutdown the Event Log's RPC interface is already gone. Before the fix, that exception escaped `SvcDoRun`, and pywin32 reported a failed stop (SCM 7024). The earlier hypothesis is now **confirmed**. The `0x20000001` code itself is still not mapped to a pywin32 message.
+
+**What this record covers (build c5dd16f):** install, session 0 / LocalSystem, overhead, presence, a managed workload, crash recovery, graceful stop, start after reboot, clean stop at OS shutdown, and the helper at logon.
+
+**What it does not cover:**
+- E1 child workers fail on this build (the probe regression, fixed in cd02387 but not installed). Pass 1 here predates `e1_used_arrangements_ok`.
+- Service RSS is within 1 MiB of its limit.
+- This is one Home-edition machine, not a lab image.
 
 **Scope.** This is new evidence for one machine, not proof of lab compatibility:
 - lab images are Pro, Education or Enterprise, often domain-joined and under Deep Freeze;
