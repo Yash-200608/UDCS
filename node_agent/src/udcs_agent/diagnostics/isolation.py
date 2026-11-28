@@ -217,6 +217,7 @@ def _launch_probe(isolation, workload_id, job, workdir, plan_path, result_path, 
         isolation.python,
         "-I",
         "-S",
+        "-B",  # host-side as the agent's identity: never write .pyc into the runtime
         "-c",
         isolation.bootstrap("isolation_probe"),
         str(plan_path),
@@ -266,7 +267,7 @@ def run_selftest(
 
     threading.Thread(target=accept_loop, daemon=True).start()
     helper = subprocess.Popen(  # noqa: S603 -- our own interpreter, fixed arguments
-        [isolation.python, "-I", "-S", "-c", "import time; time.sleep(120)"],
+        [isolation.python, "-I", "-S", "-B", "-c", "import time; time.sleep(120)"],
         creationflags=0x08000000,
     )
     with winreg.CreateKey(winreg.HKEY_CURRENT_USER, REG_KEY) as key:

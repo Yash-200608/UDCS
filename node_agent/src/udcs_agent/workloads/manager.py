@@ -679,11 +679,7 @@ class WorkloadManager:
             f"import sys; sys.path[:0] = {paths!r}; "
             "from udcs_agent.workloads.synthetic import main; sys.exit(main())"
         )
-        argv = [
-            self._python,
-            "-I",
-            "-c",
-            bootstrap,
+        workload_args = [
             "--kind",
             record.spec.kind.value,
             "--dir",
@@ -693,6 +689,8 @@ class WorkloadManager:
             "--memory-mb",
             str(record.spec.memory_mb),
         ]
+        # -B (host-side, agent identity): never write .pyc into the agent's own install.
+        argv = [self._python, "-I", "-B", "-c", bootstrap, *workload_args]
         env = {
             k: v
             for k, v in os.environ.items()
@@ -710,7 +708,7 @@ class WorkloadManager:
 
                 try:
                     process = self._isolation.launch(
-                        record.spec.id, "synthetic", argv[4:], job, workdir
+                        record.spec.id, "synthetic", workload_args, job, workdir
                     )
                 except IsolationUnavailable as exc:
                     raise OSError(str(exc)) from exc

@@ -166,7 +166,7 @@ class AppContainerIsolation:
                 "TEMP": str(workdir / "tmp"),
                 "TMP": str(workdir / "tmp"),
             }
-            argv = [self.python, "-I", "-S", "-c", self.bootstrap(module), *args]
+            argv = [self.python, "-I", "-S", "-B", "-c", self.bootstrap(module), *args]
             return ac.launch_in_appcontainer(
                 argv,
                 job,

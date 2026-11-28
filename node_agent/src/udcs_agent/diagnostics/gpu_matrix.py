@@ -26,7 +26,7 @@ def _bootstrap(out: Path) -> list[str]:
         f"import sys; sys.path[:0] = {paths!r}; "
         f"from udcs_agent.diagnostics.gpu_probe import main; sys.exit(main([{str(out)!r}]))"
     )
-    return [getattr(sys, "_base_executable", sys.executable), "-I", "-c", code]
+    return [getattr(sys, "_base_executable", sys.executable), "-I", "-B", "-c", code]
 
 
 def _read(out: Path, exit_code: int | None) -> dict[str, object]:

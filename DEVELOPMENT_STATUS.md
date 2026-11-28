@@ -519,7 +519,13 @@ Not covered by this run:
   - **V0 (control):** 1,015 student-hive findings, all six explicit targets readable.
   - **V1, grant SID = the service's own `NT SERVICE\` SID:** **0 student findings, 0 violations**; self-test, kill tree and CUDA pass; no leftover profiles. Child token: SYSTEM and Administrators deny-only, low integrity, only `SeChangeNotifyPrivilege`, AppContainer with 2 capabilities.
   - **V2:** `0xC0000022`, which confirms that B depends on `BUILTIN\Users` being in the service token.
-  - **Snapshot change explained:** the isolation self-test's two *host-side* (unsandboxed, SYSTEM) Python processes (`diagnostics/isolation.py:216`, `:268`) run without `-B` and write stdlib `.pyc` into the interpreter folder. It is not the sandbox. Fix proposed: add `-B`.
+  - **Snapshot change explained:** the isolation self-test's two *host-side* (unsandboxed, SYSTEM) Python processes (`diagnostics/isolation.py:216`, `:268`) run without `-B` and write stdlib `.pyc` into the interpreter folder. It is not the sandbox. **Fixed (implemented, unit-tested; not yet re-measured as SYSTEM):** `-B` is now on every interpreter the agent starts:
+    - host-side: the unsandboxed probe and helper in `diagnostics/isolation.py`, the GPU probe in `diagnostics/gpu_matrix.py`, and the synthetic workload in `workloads/manager.py`;
+    - in the sandbox, for consistency: the module launch in `workloads/isolation.py` and the probe's child process.
+
+    The first attempt broke 9 e2e tests: `workloads/manager.py` passed the synthetic workload's arguments to the AppContainer launch as the positional slice `argv[4:]`, so inserting `-B` shifted the bootstrap code into the workload's arguments. That fragile slice was replaced by an explicit `workload_args` list.
+
+    `node_agent/tests/test_interpreter_flags.py` scans every `[python, "-I", ...]` argv and fails without `-B`. **Not covered:** the service host itself still starts as `python.exe -I run_service.py`, without `-B`, so the agent process still writes `.pyc` into its own install folder (SYSTEM- and Administrators-only, so this is an integrity drift, not an escalation path). Changing that is an installer/binPath change and is left for a deliberate decision, because the installed service must not be modified.
   - **Open:**
     1. **One machine:** measured only on build 26300; the original machine is build 22000.
     2. **Owner rights untested:** the child's token owner is SYSTEM, which is deny-only. Whether its files carry owner rights is untested.

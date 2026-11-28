@@ -212,7 +212,7 @@ def main(argv: list[str] | None = None) -> int:
         json.dump(results, handle)
     if plan.get("spawn_child_and_sleep"):
         child = subprocess.Popen(
-            [sys.executable, "-I", "-S", "-c", "import time; time.sleep(300)"],
+            [sys.executable, "-I", "-S", "-B", "-c", "import time; time.sleep(300)"],
             creationflags=0x08000000,
         )
         with open(args[1] + ".child", "w", encoding="utf-8") as handle:
