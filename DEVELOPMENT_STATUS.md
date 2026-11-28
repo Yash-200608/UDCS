@@ -1,6 +1,6 @@
 # Development Status
 
-_Last updated: 2026-11-27. Development checkpoint on branch `feature/udcs-background-agent-m15`. This is **not** a release, and Milestone 1.5 is **not accepted**._
+_Last updated: 2026-11-28. Development checkpoint on branch `feature/udcs-background-agent-m15`. This is **not** a release, and Milestone 1.5 is **not accepted**._
 
 ## Summary
 
@@ -484,6 +484,7 @@ Not covered by this run:
 
 | Decision | Status / recommendation |
 |---|---|
+| D-4: workload token identity. As SYSTEM, the sandbox reads the signed-in student's `HKCU\Software`/`Environment`/`_Classes` through Windows' own ALL APPLICATION PACKAGES and `registryRead` grants | **open, blocks user code.** Recommendation: run workloads under a dedicated low-privilege local account (token via S4U logon from the service, no stored password), so the normal half of the access check denies student hives. Experiment first (needs an admin-created test account). Alternatives: a restricted token (complex, weaker), or accepting the read (not recommended) |
 | D-2: native session helper | open |
 | D-3: execution isolation | **decided**: native AppContainer now; MXC for 24H2+ nodes later (ADR 0001) |
 | Enabling user code | **not yet**: per-node admin eligibility is now built (ADR 0003); still needs ADR 0001 gate 2 (lab-image review), M1.5 pass 2 and an operator procedure for granting eligibility |
