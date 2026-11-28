@@ -1,7 +1,8 @@
 <#
 .SYNOPSIS
-  Read-only readiness check before the acceptance runs on the ORIGINAL machine (the PC
-  where m15_service_acceptance.ps1 pass 1 installed the UDCSAgent service). Safe on any
+  Read-only readiness check before the service-path acceptance runs on the designated
+  acceptance machine (the PC where m15_service_acceptance.ps1 pass 1 installed UDCSAgent;
+  its report is docs\acceptance\data\machines\<label>\). Safe on any
   machine, with or without elevation.
 
   It changes nothing: no service start/stop/install, no ACLs, no scheduled tasks, no
@@ -18,13 +19,14 @@
     - is this PowerShell elevated (pass 2 and -AsSystem need it)?
 
   Exit code: 0 = this machine is ready for pass 2 and the service-path runs;
-             3 = not ready (every reason is listed). Never 0 on a development PC.
+             3 = not ready (every reason is listed). Never 0 before pass 1 has run here.
 #>
 [CmdletBinding()]
 param([string]$Out)
 $ErrorActionPreference = 'Stop'
 $Repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
-$Pass1 = Join-Path $Repo 'docs\acceptance\data\m15-service-acceptance.json'
+. (Join-Path $PSScriptRoot 'evidence_paths.ps1')
+$Pass1 = Get-MachineEvidencePath (Join-Path $Repo 'docs\acceptance\data')
 $Install = "$env:ProgramFiles\UDCS\Agent"
 $Service = 'UDCSAgent'
 if (-not $Out) {
@@ -48,7 +50,7 @@ $gpus = @(Get-CimInstance Win32_VideoController | ForEach-Object { "$($_.Name) (
 $boot = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime
 if (Test-Path $Pass1) {
     $report = Get-Content $Pass1 -Raw | ConvertFrom-Json
-    $buildOk = $report.machine.build -eq $build
+    $buildOk = ($report.machine.build -eq $build) -and ($report.machine.label -eq (Get-MachineLabel))
     $gpuOk = -not (Compare-Object @($report.machine.gpu) $gpus)
     Note 'pass1_machine_build' $buildOk @{ recorded = $report.machine.build; this = $build } 'Windows build differs from the pass-1 machine'
     Note 'pass1_machine_gpus' $gpuOk @{ recorded = @($report.machine.gpu); this = $gpus } 'GPUs differ from the pass-1 machine'
@@ -58,7 +60,7 @@ if (Test-Path $Pass1) {
     Note 'rebooted_since_pass1' $rebooted @{ pass1_boot = $marker.boot_before; this_boot = $boot.ToString('o'); same_machine = ($buildOk -and $gpuOk) } 'no reboot of the pass-1 machine since pass 1 (another machine, or no pass-1 marker)'
     Note 'pass2_not_yet_recorded' (-not $report.checks.starts_after_reboot) @{ starts_after_reboot = $report.checks.starts_after_reboot } 'pass 2 is already recorded'
 } else {
-    Note 'pass1_evidence' $false @{ path = $Pass1 } 'no pass-1 report in docs\acceptance\data'
+    Note 'pass1_evidence' $false @{ path = $Pass1 } 'no pass-1 report for this machine (docs\acceptance\data\machines\<label>)'
 }
 
 $svc = Get-CimInstance Win32_Service -Filter "Name='$Service'" -ErrorAction SilentlyContinue
@@ -90,7 +92,7 @@ $result = [ordered]@{
     note = 'DIAGNOSTIC ONLY: preflight results are never acceptance evidence'
     generated_at = (Get-Date).ToString('o')
     machine = $identity.machine; identity = $identity.identity
-    ready_for_original_machine_runs = ($mismatches.Count -eq 0)
+    ready_for_service_path_runs = ($mismatches.Count -eq 0)
     mismatches = $mismatches; checks = $checks
 }
 New-Item -ItemType Directory -Force -Path (Split-Path $Out) | Out-Null
@@ -103,6 +105,6 @@ if ($mismatches.Count -eq 0) {
     Write-Host '  3. tools\acceptance\m3_exposure_audit.ps1 -AsSystem'
     exit 0
 }
-Write-Host ("NOT READY for the original-machine runs ({0} mismatches):" -f $mismatches.Count) -ForegroundColor Yellow
+Write-Host ("NOT READY for the service-path runs ({0} mismatches):" -f $mismatches.Count) -ForegroundColor Yellow
 foreach ($m in $mismatches) { Write-Host "  - $m" }
 exit 3

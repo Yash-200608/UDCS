@@ -3,7 +3,10 @@
   Milestone 1.5 service acceptance (needs an elevated PowerShell). Two passes:
     1)  .\m15_service_acceptance.ps1            install + live checks, then asks you to reboot
     2)  .\m15_service_acceptance.ps1 -AfterReboot   verifies the service came back on its own
-  Results: docs\acceptance\data\m15-service-acceptance.json (merged across passes).
+  Results: docs\acceptance\data\machines\<label>\m15-service-acceptance.json (merged across
+  passes), where <label> is a hash of the host name (evidence_paths.ps1). The top-level
+  docs\acceptance\data\m15-service-acceptance.json is the retired build 22000 machine's
+  record and is never written.
 
   What it changes on this PC: installs the UDCSAgent service (Program Files\UDCS\Agent,
   ProgramData\UDCS\agent), one HKLM Run value for the session helper, and runs one
@@ -11,32 +14,73 @@
   infrastructure\windows\uninstall-agent.ps1 -RemoveData.
 
   Evidence protection:
-    - pass 1 refuses to run when the report already holds pass-1 evidence (it would be
-      overwritten) or when UDCSAgent is already installed (it would be reinstalled).
+    - pass 1 refuses to run when this machine's report already holds pass-1 evidence (it
+      would be overwritten) or when UDCSAgent is already installed (it would be reinstalled).
       -ReplaceEvidence overrides only the first, and keeps a timestamped copy of the
       old report next to it. An installed service must be removed deliberately first.
     - pass 2 records nothing unless it runs on the pass-1 machine after a reboot.
+    - -Preflight: read-only, needs no elevation. It prints which file this pass would write
+      and whether it would refuse, then exits (0 = would proceed, 2 = would refuse) before
+      anything is installed, created or written. -EvidenceRoot exists for its tests.
     - for a read-only readiness check on any PC, use m3_preflight.ps1 instead.
 #>
 [CmdletBinding()]
-param([switch]$AfterReboot, [string]$Staging, [switch]$ReplaceEvidence)
+param([switch]$AfterReboot, [string]$Staging, [switch]$ReplaceEvidence, [switch]$Preflight, [string]$EvidenceRoot)
 $ErrorActionPreference = 'Stop'
 $Repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
-$Out = Join-Path $Repo 'docs\acceptance\data\m15-service-acceptance.json'
+. (Join-Path $PSScriptRoot 'evidence_paths.ps1')
+if ($EvidenceRoot -and -not $Preflight) { throw '-EvidenceRoot is only for -Preflight (tests); real evidence always goes to docs\acceptance\data\machines\<label>.' }
+if (-not $EvidenceRoot) { $EvidenceRoot = Join-Path $Repo 'docs\acceptance\data' }
+$EvidenceRoot = [IO.Path]::GetFullPath($EvidenceRoot)
+$Legacy = Get-LegacyEvidencePath $EvidenceRoot
+$Label = Get-MachineLabel
+$Out = Get-MachineEvidencePath $EvidenceRoot $Label
+if ([IO.Path]::GetFullPath($Out) -eq [IO.Path]::GetFullPath($Legacy)) { throw "Refusing: $Out is the retired machine's record." }
 $Data = "$env:ProgramData\UDCS\agent"
 $Install = "$env:ProgramFiles\UDCS\Agent"
 $Service = 'UDCSAgent'
+
+function Read-Report {
+    if (Test-Path -LiteralPath $Out) { return Get-Content -LiteralPath $Out -Raw | ConvertFrom-Json }
+    return New-Object PSObject
+}
+function Get-Decision($report) {
+    # Every refusal, in the order the passes apply them; the first one wins. $null = proceed.
+    if (-not $AfterReboot) {
+        if (Get-Service $Service -ErrorAction SilentlyContinue) { return 'UDCSAgent is already installed on this PC; pass 1 would reinstall it' }
+        if (($report.reboot_marker -or $report.checks) -and -not $ReplaceEvidence) { return "this machine's report already holds pass-1 evidence; pass 1 would overwrite it" }
+        return $null
+    }
+    if (-not $report.reboot_marker) { return 'no pass-1 record (reboot_marker) for this machine: run pass 1 here first' }
+    # GPU names only: Windows Update often installs a GPU driver across exactly this reboot.
+    $gpus = @(Get-CimInstance Win32_VideoController | ForEach-Object { $_.Name })
+    $recorded = @($report.machine.gpu | ForEach-Object { $_ -replace '\s\([^)]*\)$', '' })
+    if (-not $report.machine -or $report.machine.label -ne $Label -or $report.machine.build -ne [Environment]::OSVersion.Version.ToString() -or (Compare-Object $recorded $gpus)) {
+        return 'the report was not recorded on this machine (label, build or GPUs differ)'
+    }
+    if (-not ([datetime]$report.reboot_marker.boot_before -lt (Get-CimInstance Win32_OperatingSystem).LastBootUpTime)) { return 'this PC has not rebooted since pass 1' }
+    return $null
+}
+
+if ($Preflight) {
+    $refusal = Get-Decision (Read-Report)
+    $pass = '1'
+    if ($AfterReboot) { $pass = '2' }
+    [ordered]@{
+        kind = 'm15-preflight'; pass = $pass; machine_label = $Label; target = $Out
+        retired_record = $Legacy; would_refuse = ($null -ne $refusal); reason = $refusal
+    } | ConvertTo-Json | Write-Output
+    if ($refusal) { exit 2 }
+    exit 0
+}
 
 $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw 'Run from an elevated PowerShell (Run as administrator). This script never elevates itself.'
 }
 
-function Read-Report {
-    if (Test-Path $Out) { return Get-Content $Out -Raw | ConvertFrom-Json }
-    return New-Object PSObject
-}
 function Save-Report($report) {
+    if ([IO.Path]::GetFullPath($Out) -eq [IO.Path]::GetFullPath($Legacy)) { throw "Refusing to write the retired machine's record $Legacy." }
     New-Item -ItemType Directory -Force -Path (Split-Path $Out) | Out-Null
     [IO.File]::WriteAllText($Out, ($report | ConvertTo-Json -Depth 12), (New-Object Text.UTF8Encoding $false))
 }
@@ -70,27 +114,20 @@ $report = Read-Report
 $python = Join-Path $Install 'python\python.exe'
 
 if (-not $AfterReboot) {
-    if (Get-Service $Service -ErrorAction SilentlyContinue) {
-        Write-Host "UDCSAgent is already installed on this PC. Pass 1 would reinstall it; nothing changed." -ForegroundColor Yellow
-        Write-Host 'After a reboot, run -AfterReboot. To start over, uninstall it deliberately first.'
+    $refusal = Get-Decision $report
+    if ($refusal) {
+        Write-Host "Pass 1: $refusal. Nothing changed ($Out)." -ForegroundColor Yellow
+        Write-Host 'After a reboot, run -AfterReboot. -ReplaceEvidence deliberately starts a new run on this machine (the old report is kept); an installed service must be uninstalled deliberately first.'
         exit 2
     }
     if ($report.reboot_marker -or $report.checks) {
-        if (-not $ReplaceEvidence) {
-            Write-Host "The report already holds pass-1 evidence ($Out). Nothing changed." -ForegroundColor Yellow
-            Write-Host 'Pass 1 would overwrite it. Use -ReplaceEvidence only to deliberately start a new acceptance run.'
-            exit 2
-        }
         $backup = "$Out.replaced-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
         Copy-Item $Out $backup
         Write-Host "Previous evidence kept at $backup" -ForegroundColor Yellow
         $report = New-Object PSObject
     }
-    Set-Field $report 'machine' ([ordered]@{
-        host = $env:COMPUTERNAME; os = (Get-CimInstance Win32_OperatingSystem).Caption
-        build = [Environment]::OSVersion.Version.ToString()
-        gpu = (Get-CimInstance Win32_VideoController | ForEach-Object { "$($_.Name) ($($_.DriverVersion))" })
-    })
+    # Edition, build, CPU, RAM and GPUs, with a hashed label; never the host name.
+    Set-Field $report 'machine' (Get-MachineFacts)
     Set-Field $report 'started' (Get-Date).ToString('o')
 
     # -- 1. package + install (local-only: protection must work without a controller) ----
@@ -182,22 +219,13 @@ if (-not $AfterReboot) {
 # Read-only: pass 2 installs, stops or reconfigures nothing. It records results only when
 # it is on the pass-1 machine and that machine has rebooted since, so running it early
 # (or elsewhere) can never overwrite the report with a misleading FAIL.
-if (-not $report.reboot_marker) {
-    Write-Host 'No pass-1 record (reboot_marker) in the report: run pass 1 on this PC first.' -ForegroundColor Yellow
-    exit 2
-}
-$build = [Environment]::OSVersion.Version.ToString()
-$gpus = @(Get-CimInstance Win32_VideoController | ForEach-Object { "$($_.Name) ($($_.DriverVersion))" })
-if ($report.machine -and ($report.machine.build -ne $build -or (Compare-Object @($report.machine.gpu) $gpus))) {
-    Write-Host ("This is not the pass-1 machine (recorded build {0}, this build {1}); nothing recorded." -f $report.machine.build, $build) -ForegroundColor Yellow
+$refusal = Get-Decision $report
+if ($refusal) {
+    Write-Host "Pass 2: $refusal. Nothing recorded ($Out)." -ForegroundColor Yellow
     exit 2
 }
 $boot = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime
-$rebooted = $report.reboot_marker -and ([datetime]$report.reboot_marker.boot_before -lt $boot)
-if (-not $rebooted) {
-    Write-Host 'This PC has not rebooted since pass 1; reboot, sign in, then run -AfterReboot again. Nothing recorded.' -ForegroundColor Yellow
-    exit 2
-}
+$rebooted = $true  # Get-Decision refused unless boot_before < this boot
 $svc = Get-Service $Service
 $svcPid = Get-ServicePid
 $started = (Get-Process -Id $svcPid).StartTime

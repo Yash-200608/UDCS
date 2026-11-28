@@ -1,4 +1,10 @@
-# M1.5 benchmark raw data
+# Acceptance raw data
+
+**Per-machine evidence.** Service-path results are kept under `machines/<label>/`, one directory per acceptance machine. The label is a hash of the host name; the host name itself is never recorded.
+- `machines/262cc47030b1/`: the current acceptance machine, designated 2026-11-28. No results yet.
+- `m15-service-acceptance.json` and `m2-isolation-service.json` at this level: the **retired** build 22000 machine (2026-11-22). They are history and are never written. `tests/test_acceptance_evidence.py` pins their content.
+
+## M1.5 benchmark raw data
 
 These are the raw outputs of `tools/acceptance/m15_benchmarks.py` on the development PC. See [../milestone-1.5.md](../milestone-1.5.md).
 

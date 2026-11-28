@@ -7,7 +7,10 @@
   The script asks the running service to run the isolation self-test from inside the
   service process: it drops diagnostics\isolation-request into the protected data
   directory. It then waits for diagnostics\isolation-result.json and records the
-  result in docs\acceptance\data\m2-isolation-service.json.
+  result in docs\acceptance\data\machines\<label>\m2-isolation-service.json (evidence_paths.ps1).
+  The top-level docs\acceptance\data\m2-isolation-service.json is the retired build 22000
+  machine's record and is never written. An existing result for this machine is never
+  overwritten unless -ReplaceEvidence is given, which keeps a timestamped copy.
 
   Gate to pass (ADR 0001):
   - the agent identity is NT AUTHORITY\SYSTEM in session 0;
@@ -30,10 +33,14 @@
   under %LOCALAPPDATA%\UDCS\isolation-selftest.
 #>
 [CmdletBinding()]
-param([int]$TimeoutSeconds = 300, [switch]$Diagnostic)
+param([int]$TimeoutSeconds = 300, [switch]$Diagnostic, [switch]$ReplaceEvidence)
 $ErrorActionPreference = 'Stop'
 $Repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
-$Out = Join-Path $Repo 'docs\acceptance\data\m2-isolation-service.json'
+. (Join-Path $PSScriptRoot 'evidence_paths.ps1')
+$Out = Join-Path (Split-Path (Get-MachineEvidencePath (Join-Path $Repo 'docs\acceptance\data'))) 'm2-isolation-service.json'
+if ([IO.Path]::GetFullPath($Out) -eq [IO.Path]::GetFullPath((Join-Path $Repo 'docs\acceptance\data\m2-isolation-service.json'))) {
+    throw "Refusing: $Out is the retired machine's record."
+}
 $Diagnostics = "$env:LOCALAPPDATA\UDCS\diagnostics"
 $Data = "$env:ProgramData\UDCS\agent"
 $Diag = Join-Path $Data 'diagnostics'
@@ -53,6 +60,9 @@ if ($Diagnostic) {
 $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw 'Run from an elevated PowerShell (Run as administrator), or use -Diagnostic. This script never elevates itself.'
+}
+if ((Test-Path -LiteralPath $Out) -and -not $ReplaceEvidence) {
+    throw "This machine already has an isolation result ($Out). Nothing changed. Use -ReplaceEvidence to deliberately record a new one (the old one is kept)."
 }
 $svc = Get-Service UDCSAgent -ErrorAction SilentlyContinue
 if (-not $svc -or $svc.Status -ne 'Running') {
@@ -76,6 +86,10 @@ if (-not $isSystem) {  # never evidence: keep it out of docs\acceptance\data
     Write-Host "The result is not from SYSTEM in session 0; written as a diagnostic: $Out" -ForegroundColor Yellow
 }
 New-Item -ItemType Directory -Force -Path (Split-Path $Out) | Out-Null
+if ($isSystem -and (Test-Path -LiteralPath $Out)) {  # only reachable with -ReplaceEvidence
+    Copy-Item -LiteralPath $Out "$Out.replaced-$Stamp"
+    Write-Host "Previous result kept at $Out.replaced-$Stamp" -ForegroundColor Yellow
+}
 [IO.File]::WriteAllText($Out, ($report | ConvertTo-Json -Depth 12), (New-Object Text.UTF8Encoding $false))
 
 Write-Host ("Agent identity : {0} (session {1})" -f $identity.user, $identity.session_id)

@@ -38,7 +38,8 @@
 
   Every result is labelled with the machine (a hash of its name, never the name), its
   Windows image and the execution identity. Only a verified LocalSystem result is
-  written to docs\acceptance\data; everything else goes to %LOCALAPPDATA%\UDCS\diagnostics.
+  written to docs\acceptance\data\machines\<label>\; everything else goes to
+  %LOCALAPPDATA%\UDCS\diagnostics.
 
   What -AsSystem changes on this PC, and how it is undone:
     - the protected folder: deleted at the end, including on failure and Ctrl+C. A
@@ -281,8 +282,10 @@ if (-not $isEvidence -and $wrapped.evidence) {
 $wrapped | Add-Member -NotePropertyName 'verification' -NotePropertyValue $checks -Force
 if ($provenance) { $wrapped | Add-Member -NotePropertyName 'provenance' -NotePropertyValue $provenance -Force }
 $label = $wrapped.machine.label
+if ($label -notmatch '^[0-9a-f]{12}$') { throw "Unexpected machine label '$label'; nothing written." }
 $dest = if ($isEvidence) {
-    Join-Path $Repo "docs\acceptance\data\m3-exposure-audit-$label-$Stamp.json"
+    # Per-machine evidence (evidence_paths.ps1): docs\acceptance\data\machines\<label>\.
+    Join-Path $Repo "docs\acceptance\data\machines\$label\m3-exposure-audit-$label-$Stamp.json"
 } else {
     Join-Path $Diagnostics "exposure-audit-$($wrapped.identity.context)-$label-$Stamp.json"
 }

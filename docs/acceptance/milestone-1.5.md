@@ -12,7 +12,13 @@ _2026-11-22. Raw data: `docs/acceptance/data/`. These are engineering targets me
 - E1 (CUDA works in the service process and in its child worker);
 - graceful stop in 0.27 s.
 
-**Still open:** pass 2, *service start after a reboot* (`m15_service_acceptance.ps1 -AfterReboot`), which needs a reboot.
+**Still open:** pass 2, *service start after a reboot*.
+
+**2026-11-28: the pass-1 machine above (build 22000, GT 730) was retired.**
+- Its pass 2 can never be recorded. Its pass-1 record stays unchanged as history.
+- M1.5 will be re-run, pass 1 and then pass 2, on the newly designated acceptance machine (`data/machines/262cc47030b1/`: Windows 11 Home build 26300, i5-14400F, RTX 3060). Its results go to `data/machines/262cc47030b1/m15-service-acceptance.json`.
+- **Neither pass has run there yet.** Pass 1 installs the service, which needs a separate approval.
+- A pass on that PC is evidence for one Home-edition machine, not proof of lab compatibility.
 
 Status of the other gates:
 - **PostgreSQL integration through CI:** passed on the feature branch. CI run 44985979000 migrated a clean PostgreSQL 16 database to head, and 57/57 controller and shared tests passed. Getting there exposed two real bugs, both now fixed: data loss in the 0002 downgrade on SQLite, and nondeterministic audit ordering.
