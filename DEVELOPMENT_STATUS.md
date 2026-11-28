@@ -281,7 +281,36 @@ The probe's first runs on this PC found three false positives in the probe itsel
 | `tools/acceptance/m3_preflight.ps1` | Read-only readiness check: same machine as pass 1 (build and GPU), rebooted since, service present and LocalSystem, installed agent version, repository environment, OneDrive online-only files | run here: correctly reports this is *not* the pass-1 machine and no service is installed |
 | `tools/acceptance/m15_service_acceptance.ps1 -AfterReboot` | M1.5 pass 2 | now refuses to record anything unless it is on the pass-1 machine and that machine rebooted since; still read-only |
 | `tools/acceptance/m2_isolation_service_acceptance.ps1` | Service-path isolation self-test (unchanged) | ready |
-| `tools/acceptance/m3_exposure_audit.ps1 -AsSystem` | The exposure audit as LocalSystem, through a temporary scheduled task, using the repository's code (the installed service is not upgraded, stopped or reconfigured) | user context run here; **the `-AsSystem` path is untested** (this session is not elevated) |
+| `tools/acceptance/m3_exposure_audit.ps1 -AsSystem -Staging <dir>` | The exposure audit as LocalSystem through a temporary scheduled task. It runs a hashed copy of a `package_agent.py` staging folder inside a new, admin-owned folder that only SYSTEM and Administrators can access (the installed service is not upgraded, stopped or reconfigured) | hardened after a security inspection (below); **the elevated run is untested** |
+
+**Security inspection of the SYSTEM path (2026-11-28), and fixes:**
+
+The previous `-AsSystem` design was unsafe and was never run. It had two flaws:
+- **Code a normal user can write, run as SYSTEM.** It ran the repository's `.venv` (`python.exe`, `site-packages` and `.pth` files), the base interpreter in the user profile, and editable sources. All of these are full-control for the unelevated user. Because that account is a split-token admin, any medium-integrity process could have planted code to run as SYSTEM.
+- **A user-creatable working folder.** It worked in `%ProgramData%\UDCS\exposure-audit`, where `BUILTIN\Users` may create folders. A standard user could create it first and plant junctions. SYSTEM's `rmtree`, `SetNamedSecurityInfo` grants, the runner file and the log writes could then be redirected.
+
+Fixes:
+- The script never runs repository or venv code while elevated, and only a hashed copy of the package runs as SYSTEM.
+- The working folder gets a random name and is created with a protected DACL (Administrators as owner; only SYSTEM and Administrators have access).
+- Reparse points are refused in the folder's path and in the copied files.
+- Results are written only as new files (`CreateNew`) and never through a reparse point.
+- Python runs with `-I -B`.
+- The folder is deleted with `rd /s /q`, which doesn't follow junctions. (Windows PowerShell 5.1's `Remove-Item -Recurse` can follow them.)
+- A result counts as evidence only if four cross-checks pass: the audit reports LocalSystem in session 0, the task ran as SYSTEM, the exit code is 0 or 1, and the manifest is unchanged.
+
+Verified unelevated:
+- 9 helper checks: junction detection, refusal to write through junctions or over existing files, manifest stability and change detection, and `rd` not following a junction.
+- A full rehearsal from the snapshot as the current user: 1,692 files, manifest unchanged, same 12 violations, cleanup complete.
+- Unelevated `-AsSystem` refuses.
+
+**Untested (needs elevation):**
+- creating the protected folder and its ACL check;
+- the SYSTEM task itself;
+- task self-deletion after a force-killed console.
+
+**Remaining trust assumption:** the staging folder is user-built, so the copy is only as trustworthy as that folder at copy time.
+
+**Same class, not fixed:** `m15` pass 1 runs `uv run python tools/package_agent.py` while elevated.
 
 **5. Diagnostic dry run on a development PC (build 26300, standard user, no service):**
 
