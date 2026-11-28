@@ -17,7 +17,10 @@ _2026-11-22. Raw data: `docs/acceptance/data/`. These are engineering targets me
 **2026-11-28: the pass-1 machine above (build 22000, GT 730) was retired.**
 - Its pass 2 can never be recorded. Its pass-1 record stays unchanged as history.
 - M1.5 will be re-run, pass 1 and then pass 2, on the newly designated acceptance machine (`data/machines/262cc47030b1/`: Windows 11 Home build 26300, i5-14400F, RTX 3060). Its results go to `data/machines/262cc47030b1/m15-service-acceptance.json`.
-- **Neither pass has run there yet.** Pass 1 installs the service, which needs a separate approval.
+- **Pass 1 there: all 8 checks PASS** (2026-11-28, `data/machines/262cc47030b1/README.md`).
+  - E1: CUDA works in the service process and in its child worker on the RTX 3060 (CC 8.6), as SYSTEM in session 0.
+  - Service overhead passed with only a 0.5 MiB margin (79.5 of 80 MiB RSS).
+  - **Pass 2 has not run yet.**
 - A pass on that PC is evidence for one Home-edition machine, not proof of lab compatibility.
 
 Status of the other gates:
@@ -109,7 +112,7 @@ _3 trials each, 0 missed. "Student arrives" = a presence change delivered as a s
 | GPU | Driver | Facts | UDCS status |
 |---|---|---|---|
 | GeForce GT 730 (Kepler, CC 3.5) | 456.71 / CUDA 11.1 | **[measured]** NVML discovery works (utilization and power *Not Supported*); the CUDA driver API runs a JIT-compiled PTX kernel in the user session; PDH per-process GPU counters work | CPU-only for real workloads. Current PyTorch requires CC ≥ 7.5 **[documented]**. Usable for synthetic validation only |
-| RTX 3060 / 4060 Ti (CC 8.6 / 8.9) | not tested | — | eligible in principle; **needs E1 on real hardware** |
+| RTX 3060 / 4060 Ti (CC 8.6 / 8.9) | RTX 3060: 32.0.16.2124 | **[measured] RTX 3060, 2026-11-28 (machine 262cc47030b1):** E1 passes in the service process (context 124 ms, kernels around 20 ms) and its child worker (73 ms) as SYSTEM in session 0. The 4060 Ti is untested. | RTX 3060 ✅ for the arrangements UDCS uses |
 
 ## Weaknesses found and fixed during acceptance
 

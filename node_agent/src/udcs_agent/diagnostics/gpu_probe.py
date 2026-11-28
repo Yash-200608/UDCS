@@ -16,13 +16,25 @@ import traceback
 from pathlib import Path
 
 
+def _account() -> str:
+    """Who the probe ran as, from the token SID, never a name. This lands in committed
+    acceptance evidence: LocalSystem's USERNAME is the machine account (HOSTNAME$), which
+    leaked the host name, and a user worker's USERNAME is a student's account name."""
+    from udcs_agent.diagnostics.context import LOCAL_SYSTEM_SID, _sid
+
+    sid = _sid()
+    if sid == LOCAL_SYSTEM_SID:
+        return "NT AUTHORITY\\SYSTEM"
+    return "<user>" if sid else "<unknown>"
+
+
 def probe() -> dict[str, object]:
     from udcs_agent.winplat.api import current_session_id
 
     result: dict[str, object] = {
         "session_id": current_session_id(),
         "pid": os.getpid(),
-        "account": os.environ.get("USERNAME"),
+        "account": _account(),
     }
     try:
         from udcs_agent.workloads.cudadrv import CudaDevice

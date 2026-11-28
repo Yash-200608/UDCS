@@ -68,3 +68,24 @@ def test_no_acceptance_script_targets_the_retired_records():
     for script in scripts:
         for n, line in enumerate(script.read_text(encoding="utf-8-sig").splitlines(), 1):
             assert not target.search(line), f"{script.name}:{n} writes a retired record"
+
+
+def _strings(value):
+    if isinstance(value, dict):
+        for v in value.values():
+            yield from _strings(v)
+    elif isinstance(value, list):
+        for v in value:
+            yield from _strings(v)
+    elif isinstance(value, str):
+        yield value
+
+
+def test_machine_evidence_never_holds_a_machine_account_name():
+    # LocalSystem's USERNAME is HOSTNAME$ (NetBIOS name, up to 15 characters). The first
+    # pass-1 run on machine 262cc47030b1 leaked it through the E1 probe's "account".
+    machine_account = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,14}\$$")
+    for path in (EVIDENCE / "machines").rglob("*.json"):
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+        leaks = [s for s in _strings(data) if machine_account.match(s)]
+        assert not leaks, f"{path}: machine account recorded: {leaks}"

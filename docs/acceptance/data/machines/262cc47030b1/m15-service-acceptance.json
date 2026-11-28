@@ -1,0 +1,140 @@
+{
+    "machine":  {
+                    "label":  "262cc47030b1",
+                    "edition":  "Microsoft Windows 11 Home Single Language",
+                    "edition_id":  "CoreSingleLanguage",
+                    "display_version":  "26H2",
+                    "build":  "10.0.26300.0",
+                    "build_ubr":  "26300.10075",
+                    "cpu":  "Intel(R) Core(TM) i5-14400F",
+                    "cores":  10,
+                    "logical":  16,
+                    "ram_gib":  31.7,
+                    "gpu":  [
+                                "NVIDIA GeForce RTX 3060 (32.0.16.2124)"
+                            ],
+                    "scope":  "one machine; not a lab image"
+                },
+    "started":  "2026-11-28T20:17:03.7157363+05:30",
+    "checks":  {
+                   "service_starts":  {
+                                          "pass":  true,
+                                          "detail":  {
+                                                         "first_status_s":  5.5653302,
+                                                         "start_s":  0.41
+                                                     }
+                                      },
+                   "session0_localsystem":  {
+                                                "pass":  true,
+                                                "detail":  {
+                                                               "start_mode":  "Auto",
+                                                               "account":  "LocalSystem",
+                                                               "delayed":  true,
+                                                               "session":  0
+                                                           }
+                                            },
+                   "no_visible_windows":  {
+                                              "pass":  true,
+                                              "detail":  {
+                                                             "windowed_processes":  0
+                                                         }
+                                          },
+                   "service_overhead":  {
+                                            "pass":  true,
+                                            "detail":  {
+                                                           "cpu_percent_one_core":  0.208,
+                                                           "private_mib":  63.7,
+                                                           "note":  "service process only; workload jobs excluded",
+                                                           "rss_mib":  79.5
+                                                       }
+                                        },
+                   "helper_and_presence":  {
+                                               "pass":  true,
+                                               "detail":  {
+                                                              "interactive":  "active",
+                                                              "level":  "shared",
+                                                              "reasons":  [
+                                                                              "user_active"
+                                                                          ]
+                                                          }
+                                           },
+                   "workload_managed":  {
+                                            "pass":  true,
+                                            "detail":  {
+                                                           "units_done":  811,
+                                                           "level":  "shared",
+                                                           "state":  "throttled"
+                                                       }
+                                        },
+                   "crash_recovery":  {
+                                          "pass":  true,
+                                          "detail":  {
+                                                         "workload_resumed_after_s":  0.8067493,
+                                                         "resumed_from_units":  891,
+                                                         "restarted_after_s":  5.4717397
+                                                     }
+                                      },
+                   "e1_completed":  {
+                                        "pass":  true,
+                                        "detail":  {
+                                                       "seconds":  2.5660675
+                                                   }
+                                    },
+                   "graceful_stop":  {
+                                         "pass":  true,
+                                         "detail":  {
+                                                        "registry_state":  "waiting",
+                                                        "stop_s":  0.27,
+                                                        "workload_processes_left":  0
+                                                    }
+                                     }
+               },
+    "e1_gpu_matrix":  {
+                          "host_session_id":  0,
+                          "started":  1795877283.9530401,
+                          "arrangements":  {
+                                               "service_process":  {
+                                                                       "session_id":  0,
+                                                                       "pid":  23300,
+                                                                       "account":  "<host>$",
+                                                                       "device":  "NVIDIA GeForce RTX 3060",
+                                                                       "compute_capability":  "8.6",
+                                                                       "context_ms":  123.7,
+                                                                       "ok":  true,
+                                                                       "kernel_ms_median":  20.08
+                                                                   },
+                                               "service_child_worker":  {
+                                                                            "session_id":  0,
+                                                                            "pid":  17428,
+                                                                            "account":  "<host>$",
+                                                                            "device":  "NVIDIA GeForce RTX 3060",
+                                                                            "compute_capability":  "8.6",
+                                                                            "context_ms":  73.4,
+                                                                            "ok":  true,
+                                                                            "kernel_ms_median":  20.03,
+                                                                            "exit_code":  0
+                                                                        },
+                                               "session_worker_system":  {
+                                                                             "session_id":  1,
+                                                                             "pid":  23088,
+                                                                             "account":  "<host>$",
+                                                                             "device":  "NVIDIA GeForce RTX 3060",
+                                                                             "compute_capability":  "8.6",
+                                                                             "context_ms":  66.0,
+                                                                             "ok":  true,
+                                                                             "kernel_ms_median":  19.91,
+                                                                             "exit_code":  0
+                                                                         },
+                                               "session_worker_user":  {
+                                                                           "ok":  false,
+                                                                           "error":  "probe produced no result",
+                                                                           "exit_code":  1
+                                                                       }
+                                           },
+                          "finished":  1795877285.168836,
+                          "protection_level_at_start":  "constrained"
+                      },
+    "reboot_marker":  {
+                          "boot_before":  "2026-11-28T13:16:41.5000000+05:30"
+                      }
+}

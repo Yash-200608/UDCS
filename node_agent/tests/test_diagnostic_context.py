@@ -38,3 +38,15 @@ def test_localsystem_counts_only_on_the_evidence_path(monkeypatch):
     assert context.labelled("x", {}, evidence_context=False)["evidence"] is False
     fake["context"] = "localsystem-interactive-session"
     assert context.labelled("x", {}, evidence_context=True)["evidence"] is False
+
+
+def test_gpu_probe_account_never_records_a_name(monkeypatch):
+    # gpu_probe results land in committed acceptance evidence (M1.5 E1 matrix).
+    from udcs_agent.diagnostics import context, gpu_probe
+
+    monkeypatch.setenv("USERNAME", "LABPC-042$")
+    monkeypatch.setattr(context, "_sid", lambda: context.LOCAL_SYSTEM_SID)
+    assert gpu_probe._account() == r"NT AUTHORITY\SYSTEM"
+    monkeypatch.setenv("USERNAME", "jstudent")
+    monkeypatch.setattr(context, "_sid", lambda: "S-1-5-21-1-2-3-1001")
+    assert gpu_probe._account() == "<user>"
