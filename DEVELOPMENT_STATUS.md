@@ -484,7 +484,13 @@ Not covered by this run:
 
 | Decision | Status / recommendation |
 |---|---|
-| D-5 (first written as "D-4", which was already taken): workload token identity. As SYSTEM, the sandbox reads the signed-in student's `HKCU\Software`, `Environment` and `_Classes` through Windows' own ALL APPLICATION PACKAGES and `registryRead` grants | **Open, blocks user code. Recommendation: Option B.** The restricted token (SYSTEM and Administrators deny-only) passed in a real temporary LocalSystem service with `sidtype unrestricted`, using its own service SID for grants (details below). It uses documented APIs only, needs no account and no lab-policy dependency, and the only measured dependency is that the service token contains `BUILTIN\Users`. Still to do: an ADR, the implementation, and a re-measurement on build 22000. Option A remains the fallback. |
+| D-5 (first written as "D-4", which was already taken): workload token identity. As SYSTEM, the sandbox reads the signed-in student's `HKCU\Software`, `Environment` and `_Classes` through Windows' own ALL APPLICATION PACKAGES and `registryRead` grants | **Open, blocks user code. Recommendation: Option B.** The restricted token (SYSTEM and Administrators deny-only) passed in a real temporary LocalSystem service with `sidtype unrestricted`, using its own service SID for grants (details below). It uses documented APIs only, needs no account and no lab-policy dependency, and the only measured dependency is that the service token contains `BUILTIN\Users` and Everyone. The narrowest working child token (measured) keeps only `Users`, Everyone and the service SID enabled. Still to do: an ADR, the implementation, and a re-measurement on build 22000. Option A remains the fallback. |
+| D-2: native session helper | open |
+| D-3: execution isolation | **decided**: native AppContainer now; MXC for 24H2+ nodes later (ADR 0001) |
+| Enabling user code | **not yet**: per-node admin eligibility is now built (ADR 0003); still needs ADR 0001 gate 2 (lab-image review), M1.5 pass 2 and an operator procedure for granting eligibility |
+| D-4: power policy | open |
+| Repository license | none chosen |
+| Differentiator versus HTCondor | needs to be written before M3 |
 
 **D-5 Option B experiment (`tools/experiments/restricted_token_experiment.*`, 2026-11-28, dev PC; diagnostic only):**
 - **Method:**
@@ -518,18 +524,27 @@ Not covered by this run:
     1. **One machine:** measured only on build 26300; the original machine is build 22000.
     2. **Owner rights untested:** the child's token owner is SYSTEM, which is deny-only. Whether its files carry owner rights is untested.
     3. **Constraint:** the child keeps the service SID and the logon SID enabled. Production B must therefore never grant the service SID on agent-private data, because only the AppContainer check would then protect it.
-    4. **Narrower variant untested:** a token that keeps only `Users` and the service SID enabled (fewer normal-half passes).
+    4. ~~Narrower variant untested~~: measured in the narrow-variant service run below.
+- **Narrow-variant service run (`-AsService -Variants V0,V3–V6`, 2026-11-28, founder-run; grant SID = `NT SERVICE\UDCSTokenExperiment`):**
+
+  | Variant | Groups left enabled (besides the grant SID) | Probe | Student findings / violations | Self-test, kill tree, CUDA |
+  |---|---|---|---|---|
+  | V0 production (control) | all | ran | 1,015 / 1,015 | pass |
+  | V3 | `Users` | child dies `0xC0000022` | — | fail (nothing starts) |
+  | V4 | `Users`, Everyone, Authenticated Users | ran | 0 / 0 | pass (21/21 checks, CUDA devices=1) |
+  | **V5** | **`Users`, Everyone** | ran | **0 / 0** | **pass (21/21 checks, CUDA devices=1)** |
+  | V6 | `Users`, Authenticated Users | child dies `0xC0000022` | — | fail (nothing starts) |
+
+  - **Narrowest working token (measured):** `Users` + Everyone + the service SID enabled. SYSTEM, Administrators, `SERVICE`, `CONSOLE LOGON`, Authenticated Users, This Organization, `LOCAL` and the logon SID are all deny-only. That removes the earlier shared-logon-SID concern (open item 3, for the logon SID only).
+  - **Everyone is required:** without it, process startup is denied. Which object needs Everyone is **not identified**. The user-context rehearsal gave the same pattern.
+  - In V3/V6 the process is created (its token was captured), then dies during loader start-up. The failure is closed, not a partial sandbox.
+  - In V5 the probe reached 5,674 registry keys, against 6,705 in V0. None of them is in a student hive.
+  - Cleanup: the service was removed and no folder was left (founder verified both). The snapshot changes (43 `.pyc` files) are the known host-side self-test cause above.
 - **Changes B would need in production:**
   - add the SYSTEM SID to `SidsToDisable`;
   - grants name the agent's service SID instead of SYSTEM;
   - the default DACL also names the service SID (without it, the child fails with `0xC0000142`);
   - the window station and desktop grant the service SID.
-| D-2: native session helper | open |
-| D-3: execution isolation | **decided**: native AppContainer now; MXC for 24H2+ nodes later (ADR 0001) |
-| Enabling user code | **not yet**: per-node admin eligibility is now built (ADR 0003); still needs ADR 0001 gate 2 (lab-image review), M1.5 pass 2 and an operator procedure for granting eligibility |
-| D-4: power policy | open |
-| Repository license | none chosen |
-| Differentiator versus HTCondor | needs to be written before M3 |
 
 ## History
 

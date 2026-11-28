@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Decision D-4, Option B feasibility experiment (restricted SYSTEM token + AppContainer).
+  Decision D-5, Option B feasibility experiment (restricted SYSTEM token + AppContainer).
   DIAGNOSTIC ONLY: the result is never acceptance evidence and goes to
   %LOCALAPPDATA%\UDCS\diagnostics.
 

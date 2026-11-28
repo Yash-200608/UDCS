@@ -1,4 +1,4 @@
-"""Decision D-4, Option B feasibility experiment. DIAGNOSTIC ONLY, never evidence.
+"""Decision D-5, Option B feasibility experiment. DIAGNOSTIC ONLY, never evidence.
 
 Question: if the AppContainer token is built from a restricted token in which the
 agent's user SID (SYSTEM in production) and Administrators are deny-only, does the
@@ -485,7 +485,7 @@ def main(argv=None) -> int:
     grant_sid, grant_kind = pick_grant_sid(own)
     people = students()
     result: dict = {
-        "experiment": "D-4 option B: restricted SYSTEM token + AppContainer",
+        "experiment": "D-5 option B: restricted SYSTEM token + AppContainer",
         "apis": [
             "OpenProcessToken",
             "CreateRestrictedToken(DISABLE_MAX_PRIVILEGE, SidsToDisable)",
