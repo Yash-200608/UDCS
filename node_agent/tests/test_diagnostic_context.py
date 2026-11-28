@@ -11,6 +11,19 @@ def test_interactive_run_is_never_evidence():
     assert len(wrapped["machine"]["label"]) == 12  # a hash, not the host name
 
 
+def test_localsystem_identity_never_records_the_machine_account(monkeypatch):
+    # Measured on a real SYSTEM run: USERNAME was HOSTNAME$, which leaked the host name
+    # and failed the controller's "SYSTEM" runner check.
+    from udcs_agent.diagnostics import exposure_audit
+
+    monkeypatch.setattr(context, "_sid", lambda: context.LOCAL_SYSTEM_SID)
+    monkeypatch.setattr(context, "_session_id", lambda: 0)
+    monkeypatch.setenv("USERNAME", "HOSTNAME$")
+    assert context.execution_context()["user"] == "NT AUTHORITY\\SYSTEM"
+    assert exposure_audit._runner() == "NT AUTHORITY\\SYSTEM (session 0)"
+    assert "SYSTEM" in exposure_audit._runner().upper()  # what grant_user_code requires
+
+
 def test_localsystem_counts_only_on_the_evidence_path(monkeypatch):
     fake = {
         "context": "localsystem",

@@ -303,10 +303,22 @@ Verified unelevated:
 - A full rehearsal from the snapshot as the current user: 1,692 files, manifest unchanged, same 12 violations, cleanup complete.
 - Unelevated `-AsSystem` refuses.
 
-**Untested (needs elevation):**
-- creating the protected folder and its ACL check;
-- the SYSTEM task itself;
-- task self-deletion after a force-killed console.
+**First real `-AsSystem` run (dev PC, image `11|10.0.26300`, build 26300.10075, 2026-11-28; run by the founder from an elevated PowerShell):**
+- Protected folder created and verified. Snapshot of 1,692 files, manifest unchanged after the run.
+- All 4 cross-checks passed. The probe ran in an AppContainer at low integrity with only `SeChangeNotifyPrivilege`; no errors, no truncation.
+- Task and folder removed afterwards (verified empty).
+- **Result: 11 violations, not eligible.** Every violation is a *per-user* service instance (`*_23d828`: BcastDVRUserService, WpnUserService, UnistoreSvc, UserDataSvc and 7 more) that the sandbox can open with `SERVICE_STOP`.
+  - The DACL (`sc sdshow`) grants `ALL APPLICATION PACKAGES` `RPWP` (start and stop).
+  - The run used LPAC, which is supposed to ignore `ALL APPLICATION PACKAGES`, yet the open succeeded. The reason is unexplained, and the probe does not try to actually stop a service.
+  - The same 11 appear in the interactive-user run. The user run's 12th finding, `WinSta0\Default`, is absent in session 0 as expected.
+  - Impact: user code could stop services of the logged-on student, which breaks the "students have priority" rule. This looks like a property of the Windows 11 image, not of this PC; mitigation is undecided.
+- **Two bugs found by this run, fixed:**
+  - For LocalSystem, `USERNAME` is `HOSTNAME$`, so the summary recorded the host name.
+  - The report's `runner` read `HOSTNAME$ (elevated)`, which fails `grant_user_code`'s `"SYSTEM" in runner` check, so even a passing SYSTEM audit could never have been granted.
+
+  The identity now comes from the token SID (`NT AUTHORITY\SYSTEM (session 0)`). That run's summary was kept out of the repository because it contains the host name. The evidence test now rejects a `$`-suffixed identity.
+- Still unverified: task self-deletion after a force-killed console, and the stale-folder sweep.
+- Weakness: the controller's runner check is a string match on a self-reported field. It is an operator attestation, not proof.
 
 **Remaining trust assumption:** the staging folder is user-built, so the copy is only as trustworthy as that folder at copy time.
 

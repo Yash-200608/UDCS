@@ -23,3 +23,5 @@ def test_exposure_summaries_in_evidence_folder_are_localsystem():
         data = json.loads(path.read_text(encoding="utf-8-sig"))
         assert data.get("evidence") is True, path.name
         assert data["identity"]["context"] == "localsystem", path.name
+        # LocalSystem's USERNAME is HOSTNAME$: a trailing $ means the host name leaked.
+        assert not str(data["identity"]["user"]).endswith("$"), path.name

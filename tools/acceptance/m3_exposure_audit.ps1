@@ -233,7 +233,7 @@ sys.exit(main(['--plain-logs', 'audit-exposure', '--out', r'$Report', '--summary
             manifest_before = $before
             manifest_after = $after
             manifest_unchanged = ($before.sha256 -eq $after.sha256)
-            staging = $Staging
+            staging = (Split-Path $Staging -Leaf)  # the leaf only: the full path names the user
             repository = Get-RepoHead
         }
         $Report = Join-Path $UserScratch "exposure-report-$Stamp.json"

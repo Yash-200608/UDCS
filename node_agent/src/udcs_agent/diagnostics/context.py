@@ -63,7 +63,8 @@ def execution_context() -> dict:
         "is_local_system": sid == LOCAL_SYSTEM_SID,
         "elevated": _elevated(),
         "session_id": session,
-        "user": getpass.getuser(),
+        # LocalSystem's USERNAME is the machine account (HOSTNAME$): never record it.
+        "user": "NT AUTHORITY\\SYSTEM" if sid == LOCAL_SYSTEM_SID else getpass.getuser(),
         "sid_kind": "LocalSystem" if sid == LOCAL_SYSTEM_SID else "user",
     }
 

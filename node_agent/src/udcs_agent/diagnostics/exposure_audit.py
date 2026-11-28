@@ -224,6 +224,12 @@ def build_plan(data_dir: Path, scratch: Path, profile_folder: str | None) -> dic
 
 
 def _runner() -> str:
+    """Who ran the audit, from the process token (not USERNAME: for LocalSystem that is
+    the machine account HOSTNAME$, which would leak the host name and hide SYSTEM)."""
+    from udcs_agent.diagnostics.context import LOCAL_SYSTEM_SID, _session_id, _sid
+
+    if _sid() == LOCAL_SYSTEM_SID:
+        return f"NT AUTHORITY\\SYSTEM (session {_session_id()})"
     user = getpass.getuser()
     try:
         admin = bool(ctypes.windll.shell32.IsUserAnAdmin())
