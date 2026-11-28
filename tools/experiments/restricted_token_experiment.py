@@ -52,6 +52,9 @@ from udcs_shared.exposure import finding_violation, sensitive_registry  # noqa: 
 
 ADMINS = "S-1-5-32-544"
 SYSTEM = "S-1-5-18"
+USERS = "S-1-5-32-545"
+EVERYONE = "S-1-1-0"
+AUTH_USERS = "S-1-5-11"
 _adv = ctypes.WinDLL("advapi32", use_last_error=True)
 _k32 = ctypes.WinDLL("kernel32", use_last_error=True)
 _adv.GetTokenInformation.argtypes = [
@@ -474,6 +477,7 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", required=True)
     parser.add_argument("--work", required=True)
+    parser.add_argument("--variants", default="", help="comma-separated labels (default: all)")
     args = parser.parse_args(argv)
     work = Path(args.work)
     work.mkdir(parents=True, exist_ok=True)
@@ -519,6 +523,30 @@ def main(argv=None) -> int:
                 grant_sid,
             )
         )
+
+        # Narrower variants: which enabled groups does the child actually need? V2 showed
+        # that without BUILTIN\Users, ntdll cannot load (0xC0000022).
+        def keep_only(*kept: str) -> list[str]:
+            return sorted({user_sid, *[g for g in groups if g not in (grant_sid, *kept)]})
+
+        variants.append(("V3_users_and_grant_sid", keep_only(USERS), grant_sid))
+        variants.append(
+            (
+                "V4_users_everyone_authusers_grant_sid",
+                keep_only(USERS, EVERYONE, AUTH_USERS),
+                grant_sid,
+            )
+        )
+        # V3 (Users + grant SID) died with 0xC0000022 in the user context and V4 worked:
+        # which of Everyone / Authenticated Users is needed?
+        variants.append(("V5_users_everyone_grant_sid", keep_only(USERS, EVERYONE), grant_sid))
+        variants.append(("V6_users_authusers_grant_sid", keep_only(USERS, AUTH_USERS), grant_sid))
+    if args.variants:
+        wanted = {v.strip() for v in args.variants.split(",") if v.strip()}
+        unknown = wanted - {label for label, _, _ in variants}
+        if unknown:
+            raise SystemExit(f"unknown variants: {sorted(unknown)}")
+        variants = [v for v in variants if v[0] in wanted]
     for label, disable, gsid in variants:
         result["variants"][label] = run_variant(label, disable, gsid, work, people)
     wrapped = labelled("restricted-token-experiment", result, evidence_context=False)

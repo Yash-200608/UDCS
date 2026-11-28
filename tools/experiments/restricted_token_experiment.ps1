@@ -32,7 +32,9 @@
   system-wide: no ACL outside the snapshot, no service, no acceptance evidence.
 #>
 [CmdletBinding()]
-param([Parameter(Mandatory)][string]$Staging, [switch]$AsSystem, [switch]$AsService, [int]$TimeoutMinutes = 35)
+param([Parameter(Mandatory)][string]$Staging, [switch]$AsSystem, [switch]$AsService, [int]$TimeoutMinutes = 35,
+    # Comma-separated variant labels; empty runs all (V0, V1, V2, V3, V4).
+    [ValidatePattern('^[A-Za-z0-9_,]*$')][string]$Variants = '')
 # -AsService: the same experiment inside a TEMPORARY Windows service, hosted exactly like
 # the agent (python.exe -I <script>, pywin32 ServiceFramework, LocalSystem,
 # `sc sidtype unrestricted`), so its token is the real service-token shape, with its own
@@ -113,7 +115,9 @@ if (-not $AsSystem) {
         $App = Join-Path $Root 'app'
         Copy-Snapshot $App
         $out = Join-Path $Root 'result.json'
-        & (Join-Path $App 'python\python.exe') -I -B (Join-Path $App 'restricted_token_experiment.py') --out $out --work (Join-Path $Root 'work')
+        $pyArgs = @('-I', '-B', (Join-Path $App 'restricted_token_experiment.py'), '--out', $out, '--work', (Join-Path $Root 'work'))
+        if ($Variants) { $pyArgs += @('--variants', $Variants) }  # PS 5.1 drops empty native arguments
+        & (Join-Path $App 'python\python.exe') @pyArgs
         if (-not (Test-Path -LiteralPath $out)) { throw "No result (exit $LASTEXITCODE)." }
         Copy-Safe $out $dest
     } finally {
@@ -174,7 +178,7 @@ class ExperimentService(win32serviceutil.ServiceFramework):
         log = open(r'$log', 'w', encoding='utf-8', buffering=1)
         sys.stdout = sys.stderr = log
         try:
-            sys.argv = [EXPERIMENT, '--out', r'$out', '--work', r'$Root\work']
+            sys.argv = [EXPERIMENT, '--out', r'$out', '--work', r'$Root\work', '--variants', '$Variants']
             runpy.run_path(EXPERIMENT, run_name='__main__')
         except SystemExit:
             pass
@@ -244,7 +248,7 @@ try {
 import runpy, sys
 log = open(r'$log', 'w', encoding='utf-8', buffering=1)
 sys.stdout = sys.stderr = log
-sys.argv = [r'$App\restricted_token_experiment.py', '--out', r'$out', '--work', r'$Root\work']
+sys.argv = [r'$App\restricted_token_experiment.py', '--out', r'$out', '--work', r'$Root\work', '--variants', '$Variants']
 runpy.run_path(r'$App\restricted_token_experiment.py', run_name='__main__')
 "@
     [IO.File]::WriteAllText($runner, $body, (New-Object Text.UTF8Encoding $false))
