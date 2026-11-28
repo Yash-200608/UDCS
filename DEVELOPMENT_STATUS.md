@@ -507,6 +507,9 @@ Not covered by this run:
   - Profile folders, credentials and `System32\config` were denied in every variant.
   - Child token in V1: low integrity, only `SeChangeNotifyPrivilege`, 2 capabilities, user SID and Administrators deny-only.
 - **The same in the user context** (logon SID as the grant SID): V1 has 0 student findings and the self-test passes.
+  - **Correction (2026-11-28):** I reported these rehearsals by their student findings only. Every user-context run of V1, V4 and V5 also had **1 violation**: `interactive session reachable: window WinSta0\Default (open)`.
+  - **Cause:** the stand-in grant SID is the logon SID, and the interactive desktop's DACL grants it. This is one more concrete reason the logon SID is not production-valid.
+  - The service runs, where the grant SID is the service SID, had **0** violations.
 - **My prediction was wrong:** I expected a SYSTEM token to lack `BUILTIN\Users`. The task-created SYSTEM token has it, plus `SERVICE`, `CONSOLE LOGON`, a logon SID and `NT SERVICE\Schedule`.
 - **Limits:**
   1. **Not the service token.** The experiment ran from a scheduled task, not the UDCSAgent service. The service token's groups (`Users`? the `NT SERVICE\UDCSAgent` SID from `sc sidtype unrestricted`?) are unmeasured, and B needs both.
@@ -553,6 +556,11 @@ Not covered by this run:
   - Child token: only Everyone, `BUILTIN\Users` and the service SID enabled; the user SID is deny-only.
   - The service was removed and no folder was left (founder verified both).
   - V5 is now measured twice in a real LocalSystem service on this build.
+- **Build 22000 re-measurement prepared (not run):**
+  - **Bundle:** `tools/experiments/make_d5_bundle.ps1` packages a staging of the current commit with the three scripts and `tools/experiments/RUNBOOK-build22000.md`. The runbook covers the read-only `sc qsidtype` / `sc qc` checks, the V0/V1/V5 temporary-service run, cleanup checks and a privacy note.
+  - **Window-station fix:** the experiment now uses its own window station name. The agent's `UDCSWorkloads` window station is opened, not refused, if it already exists, so on a node running UDCSAgent the experiment would have added ACEs to the installed service's live window station and desktop.
+  - **Verified from an extracted copy outside the repository (user context):** V0 and V5 ran; V5 had 0 student findings and passed the self-test (21/21), the kill tree and CUDA, with the known `WinSta0\Default` user-context violation.
+  - **Production note (not fixed):** `workload_desktop` would likewise adopt a pre-existing `UDCSWorkloads` window station. Only SYSTEM or an administrator can create one in session 0, so this is hardening (`CWF_CREATE_ONLY`) rather than an open hole.
 - **Changes B would need in production:**
   - add the SYSTEM SID to `SidsToDisable`;
   - grants name the agent's service SID instead of SYSTEM;
