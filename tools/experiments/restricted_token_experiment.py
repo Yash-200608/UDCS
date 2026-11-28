@@ -199,6 +199,15 @@ def pick_grant_sid(token: dict) -> tuple[str | None, str]:
     for g in token["groups"]:
         if "logon_id" in g["flags"] and "enabled" in g["flags"]:
             return g["sid"], "logon SID: NOT production-valid (shared by the whole logon session)"
+    for g in token["groups"]:
+        if g["sid"] == "S-1-5-11" and "enabled" in g["flags"]:
+            # Only so the experiment can answer whether the child can start at all. Granting
+            # Authenticated Users is NOT acceptable in production (every user would pass the
+            # normal half); the agent would use its service SID (sc sidtype unrestricted).
+            return g["sid"], (
+                "Authenticated Users: EXPERIMENT-ONLY stand-in, NOT production-valid "
+                "(no service/task SID in a SYSTEM scheduled-task token)"
+            )
     return None, "no enabled agent-unique SID in this token"
 
 
