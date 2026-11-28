@@ -82,7 +82,28 @@ The GitHub Windows runner (an elevated administrator, build 26100) killed every 
 ## Consequences and limits
 
 - **One-time grant cost:** read/execute is granted on the interpreter directory once per node (41.6 s measured on first propagation).
-- **Standard, not LPAC:** this mode is not LPAC, so anything Windows grants to ALL APPLICATION PACKAGES is readable, for example `C:\Windows` and parts of HKLM. Student profiles, `ProgramData\UDCS` and other workloads are not.
+- **Superseded 2026-11-28: workloads now run under LPAC plus the `registryRead` capability.**
+  - **Before:** this section said workloads run as a standard AppContainer, not LPAC, so anything Windows grants to ALL APPLICATION PACKAGES was reachable, for example `C:\Windows` and parts of HKLM.
+  - **Why it changed:** the first LocalSystem exposure audit found that a standard AppContainer can open the signed-in user's per-user services (`WpnUserService_*`, `UnistoreSvc_*` and 9 more) with `SERVICE_STOP`. Their DACL grants ALL APPLICATION PACKAGES `RPWP`, which violates student priority.
+  - **[measured, dev PC build 26300, current user]:**
+
+    | Sandbox | Python starts | Per-user service |
+    |---|---|---|
+    | LPAC alone | no, dies with `0xC0000022` (the earlier finding) | — |
+    | LPAC + `registryRead` | yes | `OpenSCManager` denied |
+
+  - **Exposure audit before and after:**
+
+    | Finding | Standard AppContainer | LPAC + `registryRead` |
+    |---|---|---|
+    | Service findings | 85 | 0 |
+    | Named objects | 8 | 0 |
+    | Pipes | 9 | 1 |
+    | Registry reads | 6,222 | 6,215 |
+
+  - **Side effect:** under LPAC, `LookupPrivilegeNameW` fails, so the probes resolve privilege LUIDs from a fixed table.
+  - **Also measured:** CUDA initialises inside the sandbox under LPAC (self-test reports `devices=1`, RTX 3060, current user), and the node agent tests and the package-execution e2e test pass (181 tests).
+  - **Not yet measured:** the SYSTEM-context audit under LPAC, other Windows builds, and long GPU workloads.
 - **Kernel attack surface:** AppContainer is not a VM. A kernel or driver exploit (including in the GPU driver) crosses it, so threat T10 is reduced, not closed.
 - **Network:** jobs that need networking need an explicit, reviewed capability design. Not done yet.
 

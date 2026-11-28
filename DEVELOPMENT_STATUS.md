@@ -309,7 +309,13 @@ Verified unelevated:
 - Task and folder removed afterwards (verified empty).
 - **Result: 11 violations, not eligible.** Every violation is a *per-user* service instance (`*_23d828`: BcastDVRUserService, WpnUserService, UnistoreSvc, UserDataSvc and 7 more) that the sandbox can open with `SERVICE_STOP`.
   - The DACL (`sc sdshow`) grants `ALL APPLICATION PACKAGES` `RPWP` (start and stop).
-  - The run used LPAC, which is supposed to ignore `ALL APPLICATION PACKAGES`, yet the open succeeded. The reason is unexplained, and the probe does not try to actually stop a service.
+  - Correction to an earlier claim: the run did **not** use LPAC. Workloads were launched as standard AppContainers (ADR 0001), which honour `ALL APPLICATION PACKAGES` grants, so the open is expected. The probe does not try to actually stop a service.
+  - **Fixed:** workloads now run under LPAC plus `registryRead`.
+    - **Experiment:** under LPAC alone, Python dies with `0xC0000022`. With `registryRead`, Python starts and `OpenSCManager` is denied.
+    - **Interactive-user audit, before → after:** 12 → 1 violations. The remaining one is `WinSta0\Default`, which is absent in session 0.
+    - **Isolation self-test:** passes, and CUDA still initialises in the sandbox.
+    - **Side effect:** under LPAC, `LookupPrivilegeNameW` fails, so privilege names now come from fixed LUIDs.
+    - **Pending:** a LocalSystem re-run.
   - The same 11 appear in the interactive-user run. The user run's 12th finding, `WinSta0\Default`, is absent in session 0 as expected.
   - Impact: user code could stop services of the logged-on student, which breaks the "students have priority" rule. This looks like a property of the Windows 11 image, not of this PC; mitigation is undecided.
 - **Two bugs found by this run, fixed:**

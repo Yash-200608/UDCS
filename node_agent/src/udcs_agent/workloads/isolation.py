@@ -102,6 +102,19 @@ class AppContainerIsolation:
         self._capability = capability
         return capability
 
+    @staticmethod
+    def sandbox(package: str, capability: str):
+        """LPAC (ignores everything Windows grants to ALL APPLICATION PACKAGES) plus the
+        `registryRead` capability, without which Python dies at start (0xC0000022).
+        Measured 2026-11-28: a standard AppContainer could open the signed-in user's
+        per-user services (e.g. WpnUserService_*) for SERVICE_STOP through their
+        ALL APPLICATION PACKAGES grant; under this sandbox even OpenSCManager is denied."""
+        from udcs_agent.winplat import appcontainer as ac
+
+        return ac.SandboxSpec(
+            package, (capability, ac.capability_sid(ac.REGISTRY_READ_CAPABILITY)), lpac=True
+        )
+
     def bootstrap(self, module: str) -> str:
         """A sandboxed process has no console, so a crash leaves its traceback in its own
         workdir (the current directory) as workload-error.txt."""
@@ -157,7 +170,7 @@ class AppContainerIsolation:
             return ac.launch_in_appcontainer(
                 argv,
                 job,
-                ac.SandboxSpec(package, (capability,), lpac=False),
+                self.sandbox(package, capability),
                 cwd=workdir,
                 env=env,
                 desktop=ac.workload_desktop(capability),
@@ -232,7 +245,7 @@ class AppContainerIsolation:
             return ac.launch_in_appcontainer(
                 argv,
                 job,
-                ac.SandboxSpec(package, (capability,), lpac=False),
+                self.sandbox(package, capability),
                 cwd=root,
                 env=env,
                 desktop=ac.workload_desktop(capability),

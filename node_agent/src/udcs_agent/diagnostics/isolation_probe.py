@@ -72,6 +72,46 @@ def _registry(hive: str, key: str, value: str):
         return winreg.QueryValueEx(handle, value)[0]
 
 
+# winnt.h SE_*_PRIVILEGE LUIDs (low part; the high part is 0). Constant across Windows.
+_PRIVILEGE_LUIDS = {
+    2: "SeCreateTokenPrivilege",
+    3: "SeAssignPrimaryTokenPrivilege",
+    4: "SeLockMemoryPrivilege",
+    5: "SeIncreaseQuotaPrivilege",
+    6: "SeMachineAccountPrivilege",
+    7: "SeTcbPrivilege",
+    8: "SeSecurityPrivilege",
+    9: "SeTakeOwnershipPrivilege",
+    10: "SeLoadDriverPrivilege",
+    11: "SeSystemProfilePrivilege",
+    12: "SeSystemtimePrivilege",
+    13: "SeProfileSingleProcessPrivilege",
+    14: "SeIncreaseBasePriorityPrivilege",
+    15: "SeCreatePagefilePrivilege",
+    16: "SeCreatePermanentPrivilege",
+    17: "SeBackupPrivilege",
+    18: "SeRestorePrivilege",
+    19: "SeShutdownPrivilege",
+    20: "SeDebugPrivilege",
+    21: "SeAuditPrivilege",
+    22: "SeSystemEnvironmentPrivilege",
+    23: "SeChangeNotifyPrivilege",
+    24: "SeRemoteShutdownPrivilege",
+    25: "SeUndockPrivilege",
+    26: "SeSyncAgentPrivilege",
+    27: "SeEnableDelegationPrivilege",
+    28: "SeManageVolumePrivilege",
+    29: "SeImpersonatePrivilege",
+    30: "SeCreateGlobalPrivilege",
+    31: "SeTrustedCredManAccessPrivilege",
+    32: "SeRelabelPrivilege",
+    33: "SeIncreaseWorkingSetPrivilege",
+    34: "SeTimeZonePrivilege",
+    35: "SeCreateSymbolicLinkPrivilege",
+    36: "SeDelegateSessionUserImpersonatePrivilege",
+}
+
+
 def _token() -> dict:
     advapi = ctypes.WinDLL("advapi32", use_last_error=True)
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -111,8 +151,15 @@ def _token() -> dict:
         attrs = int.from_bytes(raw[offset + 8 : offset + 12], "little")
         name = ctypes.create_unicode_buffer(64)
         size = wintypes.DWORD(64)
-        advapi.LookupPrivilegeNameW(None, luid, name, ctypes.byref(size))
-        privileges.append({"name": name.value, "enabled": bool(attrs & 0x2)})
+        value = int.from_bytes(luid.raw, "little")
+        # Under LPAC, LookupPrivilegeNameW (an LSA call) fails and leaves the name empty
+        # (measured 2026-11-28). Privilege LUIDs are fixed by Windows, so fall back to the
+        # table; an unknown LUID stays visible as "luid:<n>" and fails every check.
+        if not advapi.LookupPrivilegeNameW(None, luid, name, ctypes.byref(size)) or not name.value:
+            resolved = _PRIVILEGE_LUIDS.get(value, f"luid:{value}")
+        else:
+            resolved = name.value
+        privileges.append({"name": resolved, "luid": value, "enabled": bool(attrs & 0x2)})
     il = info(25)  # TokenIntegrityLevel: SID_AND_ATTRIBUTES; the SID's last RID is the level
     sid_ptr = ctypes.c_void_p.from_buffer(il).value
     advapi.GetSidSubAuthorityCount.argtypes = [ctypes.c_void_p]

@@ -98,7 +98,9 @@ def detect_isolation(data_dir: Path | None = None) -> list[IsolationCapability]:
     caps.append(
         IsolationCapability(
             name="appcontainer_lpac",
-            available=False,  # not used yet: Python fails to start under LPAC (see ADR 0001)
+            # Workloads use LPAC plus registryRead (ADR 0001, 2026-11-28); this capability-less
+            # cmd.exe check only shows the kernel supports LPAC.
+            available=ok,
             verified=ok,
             detail=f"cmd.exe test: {detail}",
         )
