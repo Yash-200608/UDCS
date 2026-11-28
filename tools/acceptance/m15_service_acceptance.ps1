@@ -226,13 +226,29 @@ if ($refusal) {
 }
 $boot = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime
 $rebooted = $true  # Get-Decision refused unless boot_before < this boot
+# Keep every earlier pass-2 attempt: a re-run must never silently replace a recorded result.
+if ($report.checks.starts_after_reboot -or $report.checks.helper_started_at_logon) {
+    $attempts = @($report.pass2_attempts | Where-Object { $_ })
+    $attempts += [ordered]@{
+        finished = $report.finished; starts_after_reboot = $report.checks.starts_after_reboot
+        helper_started_at_logon = $report.checks.helper_started_at_logon }
+    Set-Field $report 'pass2_attempts' $attempts
+}
+# UDCSAgent is delayed-auto-start: the SCM starts it about 2 minutes after boot, so the state
+# right after logon proves nothing. Wait for it (the 2026-11-28 attempt read it too early).
+$waitedS = Wait-Until { (Get-Service $Service).Status -eq 'Running' -and (Get-ServicePid) -gt 0 } 300
 $svc = Get-Service $Service
 $svcPid = Get-ServicePid
-$started = (Get-Process -Id $svcPid).StartTime
+$started = $null
+if ($svcPid -gt 0) {  # PID 0 would be the System Idle Process
+    $started = (Get-CimInstance Win32_Process -Filter "ProcessId=$svcPid").CreationDate
+}
 $fresh = Wait-Until { $s = Get-Status; $s -and ([DateTimeOffset]::FromUnixTimeSeconds([int64]$s.wall).LocalDateTime -gt $boot) } 120
-Check $report 'starts_after_reboot' ($rebooted -and ($svc.Status -eq 'Running') -and ($started -gt $boot) -and ($null -ne $fresh)) @{
-    rebooted = $rebooted; status = "$($svc.Status)"; service_started_after_boot_s = [math]::Round(($started - $boot).TotalSeconds, 1)
-    governor_status_fresh = ($null -ne $fresh) }
+$startedAfterS = $null
+if ($started) { $startedAfterS = [math]::Round(($started - $boot).TotalSeconds, 1) }
+Check $report 'starts_after_reboot' ($rebooted -and ($svc.Status -eq 'Running') -and ($null -ne $started) -and ($started -gt $boot) -and ($null -ne $fresh)) @{
+    rebooted = $rebooted; status = "$($svc.Status)"; waited_for_running_s = $waitedS
+    service_started_after_boot_s = $startedAfterS; governor_status_fresh = ($null -ne $fresh) }
 $helper = Get-CimInstance Win32_Process -Filter "Name='pythonw.exe'" | Where-Object { $_.CommandLine -like '*run_helper.py*' }
 Check $report 'helper_started_at_logon' ($null -ne $helper) @{ helper_sessions = @($helper | ForEach-Object { (Get-Process -Id $_.ProcessId).SessionId }) }
 Set-Field $report 'finished' (Get-Date).ToString('o')

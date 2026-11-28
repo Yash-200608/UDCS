@@ -20,7 +20,8 @@ _2026-11-22. Raw data: `docs/acceptance/data/`. These are engineering targets me
 - **Pass 1 there: all 8 checks PASS** (2026-11-28, `data/machines/262cc47030b1/README.md`).
   - E1: CUDA works in the service process and in its child worker on the RTX 3060 (CC 8.6), as SYSTEM in session 0.
   - Service overhead passed with only a 0.5 MiB margin (79.5 of 80 MiB RSS).
-  - **Pass 2 has not run yet.**
+  - **Pass 2, attempt 1: FAIL, caused by a harness defect.** Pass 2 read the delayed-auto-start service before the SCM started it, which it did on its own 136.8 s after boot. The harness is fixed; the attempt stays recorded.
+  - **Shutdown defect found at the same reboot:** SCM event 7024, service-specific error 0x20000001, and no clean stop. Not yet diagnosed.
 - A pass on that PC is evidence for one Home-edition machine, not proof of lab compatibility.
 
 Status of the other gates:

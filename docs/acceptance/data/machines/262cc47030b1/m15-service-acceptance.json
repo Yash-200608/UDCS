@@ -87,7 +87,24 @@
                                                         "stop_s":  0.27,
                                                         "workload_processes_left":  0
                                                     }
-                                     }
+                                     },
+                   "starts_after_reboot":  {
+                                               "pass":  false,
+                                               "detail":  {
+                                                              "rebooted":  true,
+                                                              "governor_status_fresh":  true,
+                                                              "status":  "Stopped",
+                                                              "service_started_after_boot_s":  -63931494670.5
+                                                          }
+                                           },
+                   "helper_started_at_logon":  {
+                                                   "pass":  true,
+                                                   "detail":  {
+                                                                  "helper_sessions":  [
+                                                                                          1
+                                                                                      ]
+                                                              }
+                                               }
                },
     "e1_gpu_matrix":  {
                           "host_session_id":  0,
@@ -96,7 +113,7 @@
                                                "service_process":  {
                                                                        "session_id":  0,
                                                                        "pid":  23300,
-                                                                       "account":  "<host>$",
+                                                                       "account":  "\u003chost\u003e$",
                                                                        "device":  "NVIDIA GeForce RTX 3060",
                                                                        "compute_capability":  "8.6",
                                                                        "context_ms":  123.7,
@@ -106,7 +123,7 @@
                                                "service_child_worker":  {
                                                                             "session_id":  0,
                                                                             "pid":  17428,
-                                                                            "account":  "<host>$",
+                                                                            "account":  "\u003chost\u003e$",
                                                                             "device":  "NVIDIA GeForce RTX 3060",
                                                                             "compute_capability":  "8.6",
                                                                             "context_ms":  73.4,
@@ -117,7 +134,7 @@
                                                "session_worker_system":  {
                                                                              "session_id":  1,
                                                                              "pid":  23088,
-                                                                             "account":  "<host>$",
+                                                                             "account":  "\u003chost\u003e$",
                                                                              "device":  "NVIDIA GeForce RTX 3060",
                                                                              "compute_capability":  "8.6",
                                                                              "context_ms":  66.0,
@@ -136,5 +153,6 @@
                       },
     "reboot_marker":  {
                           "boot_before":  "2026-11-28T13:16:41.5000000+05:30"
-                      }
+                      },
+    "finished":  "2026-11-28T20:33:28.8209270+05:30"
 }

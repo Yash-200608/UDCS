@@ -38,7 +38,28 @@ Designated as the M1.5 acceptance machine on 2026-11-28 (decision D-6), after th
   - `tests/test_acceptance_evidence.py` fails on any machine-account name in per-machine evidence.
   - The installed service still runs the e71d7bd code with the old probe. Pass 2 does not run E1, so this file is not affected again.
 
-**Pass 2 (start after a reboot): not run yet.**
+## Pass 2, attempt 1: 2026-11-28 20:33, founder-run. **`starts_after_reboot` FAIL, `helper_started_at_logon` PASS.**
+
+The JSON records this attempt exactly as the script wrote it.
+
+- **What happened (event log and process times, read afterwards):**
+  - The PC booted at 20:31:10.
+  - UDCSAgent is delayed-auto-start: the SCM started it at 20:33:27, **136.8 s after boot, on its own**. The Application log shows "UDCSAgent starting (pid 17160)".
+  - Pass 2 wrote its file at 20:33:28.
+  - It had read the service state once, *before* that start, and saw `Stopped`. It then waited for a fresh governor status, which arrived from the newly started service, hence `governor_status_fresh: true`.
+  - With the service stopped, its PID was 0, and the script read the System Idle Process start time, hence `service_started_after_boot_s: -63931494670.5`.
+- **Verdict:** a **harness defect**, not evidence that the service fails to start; the service did start after the reboot. This attempt still stays recorded as a FAIL: it is not edited into a pass.
+- **Harness fixed:**
+  - pass 2 now waits up to 300 s for the service to be `Running`;
+  - it reads the process start time from `Win32_Process.CreationDate` and never from PID 0;
+  - it keeps every earlier attempt in `pass2_attempts`, instead of overwriting it.
+- **A real defect found at the same reboot: the shutdown is not clean.**
+  - At 20:30:59 the SCM logged event 7024: "The UDCS Node Agent service terminated with the following service-specific error: 0x20000001".
+  - There is no "UDCSAgent stopped" entry, whereas pass 1's manual stop logged "stopped (exit 0)".
+  - The cause is **not yet known**. It needs `agent.log`, which only SYSTEM and Administrators can read.
+  - M1.5 should not be accepted with this open, because workloads must checkpoint and stop cleanly when the PC shuts down.
+
+**Pass 2, attempt 2: not run yet.**
 
 **Scope.** This is new evidence for one machine, not proof of lab compatibility:
 - lab images are Pro, Education or Enterprise, often domain-joined and under Deep Freeze;
