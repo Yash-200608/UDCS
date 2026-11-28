@@ -484,7 +484,7 @@ Not covered by this run:
 
 | Decision | Status / recommendation |
 |---|---|
-| D-5 (first written as "D-4", which was already taken): workload token identity. As SYSTEM, the sandbox reads the signed-in student's `HKCU\Software`, `Environment` and `_Classes` through Windows' own ALL APPLICATION PACKAGES and `registryRead` grants | **Open, blocks user code.** Option B (restricted token: SYSTEM and Administrators deny-only) passed its feasibility experiment as LocalSystem; see below. Production validity depends on the real UDCSAgent service token, which is unmeasured. Option A (dedicated account through an S4U logon) is the fallback. |
+| D-5 (first written as "D-4", which was already taken): workload token identity. As SYSTEM, the sandbox reads the signed-in student's `HKCU\Software`, `Environment` and `_Classes` through Windows' own ALL APPLICATION PACKAGES and `registryRead` grants | **Open, blocks user code. Recommendation: Option B.** The restricted token (SYSTEM and Administrators deny-only) passed in a real temporary LocalSystem service with `sidtype unrestricted`, using its own service SID for grants (details below). It uses documented APIs only, needs no account and no lab-policy dependency, and the only measured dependency is that the service token contains `BUILTIN\Users`. Still to do: an ADR, the implementation, and a re-measurement on build 22000. Option A remains the fallback. |
 
 **D-5 Option B experiment (`tools/experiments/restricted_token_experiment.*`, 2026-11-28, dev PC; diagnostic only):**
 - **Method:**
@@ -507,6 +507,18 @@ Not covered by this run:
   2. **Grant SID not valid for production.** The experiment's grant SID was `NT SERVICE\Schedule`, Task Scheduler's own SID. A task SID (`ProcessTokenSidType`) was refused for SYSTEM tasks (0x80041316).
   3. **Snapshot changed.** The snapshot manifest changed during the SYSTEM run (audit runs left it unchanged). Cause not yet found.
   4. **Broad groups still pass the normal half.** V1's child keeps `Users`, Authenticated Users and Everyone enabled, so for files those groups can read, only the AppContainer half (LPAC plus capabilities) stops it. That is the same exposure a dedicated account (option A) would have.
+- **Temporary LocalSystem service run (`-AsService`, 2026-11-28, founder-run):**
+  - **Setup:** hosted like UDCSAgent: `python.exe -I`, pywin32 `ServiceFramework`, `sc sidtype unrestricted`. The service deleted itself afterwards (verified: no service and no folder left).
+  - **Service token groups:** Everyone, `BUILTIN\Users`, `SERVICE`, `CONSOLE LOGON`, Authenticated Users, This Organization, `NT SERVICE\UDCSTokenExperiment` (owner), a logon SID, `LOCAL`, Administrators.
+  - **V0 (control):** 1,015 student-hive findings, all six explicit targets readable.
+  - **V1, grant SID = the service's own `NT SERVICE\` SID:** **0 student findings, 0 violations**; self-test, kill tree and CUDA pass; no leftover profiles. Child token: SYSTEM and Administrators deny-only, low integrity, only `SeChangeNotifyPrivilege`, AppContainer with 2 capabilities.
+  - **V2:** `0xC0000022`, which confirms that B depends on `BUILTIN\Users` being in the service token.
+  - **Snapshot change explained:** the isolation self-test's two *host-side* (unsandboxed, SYSTEM) Python processes (`diagnostics/isolation.py:216`, `:268`) run without `-B` and write stdlib `.pyc` into the interpreter folder. It is not the sandbox. Fix proposed: add `-B`.
+  - **Open:**
+    1. **One machine:** measured only on build 26300; the original machine is build 22000.
+    2. **Owner rights untested:** the child's token owner is SYSTEM, which is deny-only. Whether its files carry owner rights is untested.
+    3. **Constraint:** the child keeps the service SID and the logon SID enabled. Production B must therefore never grant the service SID on agent-private data, because only the AppContainer check would then protect it.
+    4. **Narrower variant untested:** a token that keeps only `Users` and the service SID enabled (fewer normal-half passes).
 - **Changes B would need in production:**
   - add the SYSTEM SID to `SidsToDisable`;
   - grants name the agent's service SID instead of SYSTEM;
