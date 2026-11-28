@@ -72,8 +72,10 @@ class AgentApp:
     def run(self) -> int:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         insecure = self._data_dir_problem() if self._require_secure else None
+        # Not started here: NVML's only users are the controller link's inventory and
+        # telemetry, which start it on first use. An unenrolled (local-only) agent never
+        # pays nvmlInit's ~21-23 MiB, which is never released (I-2).
         nvml = Nvml()
-        nvml.ensure_started()
         reports = HelperReports()
         isolation = None
         if IS_WINDOWS:

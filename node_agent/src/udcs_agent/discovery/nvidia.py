@@ -5,11 +5,17 @@ best-effort: consumer GPUs commonly return NVML_ERROR_NOT_SUPPORTED for
 utilization and power (verified on a GeForce GT 730), and those fields become
 None rather than failing discovery. A machine without an NVIDIA driver yields
 an empty GPU list plus a human-readable `error`.
+
+NVML is started lazily, by its first user, never at agent start: nvmlInit() makes a
+fixed allocation in the driver's nvml.dll (~21-23 MiB on driver 32.0.16.2124) that
+nvmlShutdown() does not release and that lasts for the life of the process
+(docs/research/2026-11-28-i2-service-memory.md).
 """
 
 from __future__ import annotations
 
 import logging
+import threading
 from collections.abc import Callable
 from types import ModuleType
 from typing import Any
@@ -18,6 +24,7 @@ from udcs_shared.hardware import GpuInfo
 from udcs_shared.telemetry import GpuTelemetry
 
 logger = logging.getLogger(__name__)
+SHUTDOWN_LOCK_TIMEOUT_SECONDS = 2.0
 
 
 def _import_pynvml() -> ModuleType:
@@ -49,6 +56,8 @@ class Nvml:
     def __init__(self, loader: Callable[[], ModuleType] = _import_pynvml) -> None:
         self._loader = loader
         self._lib: Any = None
+        self._lock = threading.Lock()  # one nvmlInit at a time, however many callers
+        self._attempted = False  # has any caller tried to start NVML yet?
         self.error: str | None = None
 
     @property
@@ -56,31 +65,46 @@ class Nvml:
         return self._lib is not None
 
     def ensure_started(self) -> None:
-        """(Re)initialize NVML if it is not running. Safe to call repeatedly."""
+        """(Re)initialize NVML if it is not running. Safe to call repeatedly and from any
+        thread: concurrent callers wait, and only one of them calls nvmlInit."""
         if self._lib is not None:
             return
-        try:
-            lib = self._loader()
-        except ImportError:
-            self.error = "nvidia-ml-py is not installed"
-            return
-        try:
-            lib.nvmlInit()
-        except _nvml_errors(lib) as exc:
-            self.error = f"NVML unavailable: {_text(exc)}"
-            logger.info("no usable NVIDIA driver: %s", self.error)
-            return
-        self._lib = lib
-        self.error = None
+        with self._lock:
+            if self._lib is not None:  # another thread started it while we waited
+                return
+            self._attempted = True
+            try:
+                lib = self._loader()
+            except ImportError:
+                self.error = "nvidia-ml-py is not installed"
+                return
+            try:
+                lib.nvmlInit()
+            except _nvml_errors(lib) as exc:
+                self.error = f"NVML unavailable: {_text(exc)}"
+                logger.info("no usable NVIDIA driver: %s", self.error)
+                return
+            self._lib = lib
+            self.error = None
 
-    def shutdown(self) -> None:
-        if self._lib is None:
+    def shutdown(self, timeout: float = SHUTDOWN_LOCK_TIMEOUT_SECONDS) -> None:
+        # Bounded: if another thread is stuck inside nvmlInit (a hung driver), the agent's
+        # stop must not hang behind it. The process is exiting; skipping is harmless.
+        if not self._lock.acquire(timeout=timeout):
+            logger.warning(
+                "NVML start still in progress after %.0f s; skipping nvmlShutdown", timeout
+            )
             return
         try:
-            self._lib.nvmlShutdown()
-        except _nvml_errors(self._lib):
-            logger.debug("nvmlShutdown failed", exc_info=True)
-        self._lib = None
+            if self._lib is None:
+                return
+            try:
+                self._lib.nvmlShutdown()
+            except _nvml_errors(self._lib):
+                logger.debug("nvmlShutdown failed", exc_info=True)
+            self._lib = None
+        finally:
+            self._lock.release()
 
     def __enter__(self) -> Nvml:
         self.ensure_started()
@@ -104,8 +128,9 @@ class Nvml:
         count = self._call("nvmlDeviceGetCount")
         if count is None:
             # The driver went away under us (update/reset); re-init on next discovery.
-            self.error = "NVML stopped responding"
-            self._lib = None
+            with self._lock:
+                self.error = "NVML stopped responding"
+                self._lib = None
             return []
         handles = []
         for index in range(min(int(count), 32)):
@@ -145,6 +170,10 @@ class Nvml:
         return gpus
 
     def gpu_telemetry(self) -> list[GpuTelemetry]:
+        if not self._attempted:
+            # First use may be telemetry. A failed or lost NVML is retried by inventory
+            # (collect_inventory -> ensure_started), not on every telemetry sample.
+            self.ensure_started()
         samples = []
         for index, handle in self._handles():
             utilization = self._call("nvmlDeviceGetUtilizationRates", handle)
