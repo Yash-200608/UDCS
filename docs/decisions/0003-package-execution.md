@@ -10,6 +10,7 @@
 - **Blocked on (before enabling anywhere real):**
   - M1.5 installed-service acceptance pass 2 (start after a reboot);
   - ADR 0001 gate 2 (an audit of what a lab image exposes to ALL APPLICATION PACKAGES);
+  - [ADR 0004](0004-workload-token-identity.md) (workload token identity: as SYSTEM, the sandbox can read the signed-in student's hive until it is implemented);
   - an operator procedure for granting the per-node flag.
 - **Builds on:** [ADR 0001](0001-workload-isolation.md) (AppContainer) and [ADR 0002](0002-user-code-packaging.md) (packaging and delivery).
 
