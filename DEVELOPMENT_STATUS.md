@@ -519,7 +519,7 @@ Not covered by this run:
   - **V0 (control):** 1,015 student-hive findings, all six explicit targets readable.
   - **V1, grant SID = the service's own `NT SERVICE\` SID:** **0 student findings, 0 violations**; self-test, kill tree and CUDA pass; no leftover profiles. Child token: SYSTEM and Administrators deny-only, low integrity, only `SeChangeNotifyPrivilege`, AppContainer with 2 capabilities.
   - **V2:** `0xC0000022`, which confirms that B depends on `BUILTIN\Users` being in the service token.
-  - **Snapshot change explained:** the isolation self-test's two *host-side* (unsandboxed, SYSTEM) Python processes (`diagnostics/isolation.py:216`, `:268`) run without `-B` and write stdlib `.pyc` into the interpreter folder. It is not the sandbox. **Fixed (implemented, unit-tested; not yet re-measured as SYSTEM):** `-B` is now on every interpreter the agent starts:
+  - **Snapshot change explained:** the isolation self-test's two *host-side* (unsandboxed, SYSTEM) Python processes (`diagnostics/isolation.py:216`, `:268`) run without `-B` and write stdlib `.pyc` into the interpreter folder. It is not the sandbox. **Fixed (implemented and tested; verified as SYSTEM in the V5 service run of 2026-11-28 18:27, which reported "Snapshot unchanged (per-file)" over 1,693 files):** `-B` is now on every interpreter the agent starts:
     - host-side: the unsandboxed probe and helper in `diagnostics/isolation.py`, the GPU probe in `diagnostics/gpu_matrix.py`, and the synthetic workload in `workloads/manager.py`;
     - in the sandbox, for consistency: the module launch in `workloads/isolation.py` and the probe's child process.
 
@@ -546,6 +546,13 @@ Not covered by this run:
   - In V3/V6 the process is created (its token was captured), then dies during loader start-up. The failure is closed, not a partial sandbox.
   - In V5 the probe reached 5,674 registry keys, against 6,705 in V0. None of them is in a student hive.
   - Cleanup: the service was removed and no folder was left (founder verified both). The snapshot changes (43 `.pyc` files) are the known host-side self-test cause above.
+- **V5 re-run after the `-B` fix (`-AsService -Variants V5`, fresh staging, 2026-11-28 18:27, founder-run):**
+  - **Snapshot unchanged** (per-file, 1,693 files).
+  - 0 student findings and 0 violations; no explicit student target was readable.
+  - Self-test 21/21 checks, kill tree and CUDA (devices=1) pass.
+  - Child token: only Everyone, `BUILTIN\Users` and the service SID enabled; the user SID is deny-only.
+  - The service was removed and no folder was left (founder verified both).
+  - V5 is now measured twice in a real LocalSystem service on this build.
 - **Changes B would need in production:**
   - add the SYSTEM SID to `SidsToDisable`;
   - grants name the agent's service SID instead of SYSTEM;
