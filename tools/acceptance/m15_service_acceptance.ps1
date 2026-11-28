@@ -195,6 +195,13 @@ if (-not $AfterReboot) {
         Write-Host ($matrix.arrangements | ConvertTo-Json -Depth 4)
     }
     Check $report 'e1_completed' ($null -ne $e1) @{ seconds = $e1 }
+    # Completion alone hid a regression (2026-11-28 run 2: every child probe failed). UDCS runs
+    # CUDA in the service's child workers, so those two arrangements must actually work.
+    # The session-worker arrangements are informational (UDCS never runs work as the student).
+    $used = @('service_process', 'service_child_worker')
+    $usedOk = [bool]$e1 -and (@($used | Where-Object { -not $matrix.arrangements.$_.ok }).Count -eq 0)
+    Check $report 'e1_used_arrangements_ok' $usedOk ([ordered]@{
+        service_process = $matrix.arrangements.service_process.ok; service_child_worker = $matrix.arrangements.service_child_worker.ok })
 
     # -- 7. graceful stop ----------------------------------------------------------------
     $sw = [Diagnostics.Stopwatch]::StartNew()

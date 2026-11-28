@@ -17,7 +17,8 @@ _2026-11-22. Raw data: `docs/acceptance/data/`. These are engineering targets me
 **2026-11-28: the pass-1 machine above (build 22000, GT 730) was retired.**
 - Its pass 2 can never be recorded. Its pass-1 record stays unchanged as history.
 - M1.5 will be re-run, pass 1 and then pass 2, on the newly designated acceptance machine (`data/machines/262cc47030b1/`: Windows 11 Home build 26300, i5-14400F, RTX 3060). Its results go to `data/machines/262cc47030b1/m15-service-acceptance.json`.
-- **Pass 1 there: all 8 checks PASS** (2026-11-28, `data/machines/262cc47030b1/README.md`).
+- **Pass 1 there: all 9 checks PASS** (2026-11-28, `data/machines/262cc47030b1/README.md`; an earlier version said 8, a miscount).
+  - Run 2, after the shutdown-fix reinstall (c5dd16f), also recorded 9 passes, but its E1 child workers failed. That was a regression from the host-name redaction, now fixed. `e1_completed` only checks completion, and a stricter `e1_used_arrangements_ok` was added.
   - E1: CUDA works in the service process and in its child worker on the RTX 3060 (CC 8.6), as SYSTEM in session 0.
   - Service overhead passed with only a 0.5 MiB margin (79.5 of 80 MiB RSS).
   - **Pass 2, attempt 1: FAIL, caused by a harness defect.** Pass 2 read the delayed-auto-start service before the SCM started it, which it did on its own 136.8 s after boot. The harness is fixed; the attempt stays recorded.

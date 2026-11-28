@@ -12,7 +12,9 @@ Designated as the M1.5 acceptance machine on 2026-11-28 (decision D-6), after th
 
 `m15-service-acceptance.json` is written here by `tools/acceptance/m15_service_acceptance.ps1` (pass 1, then pass 2 after a reboot), and it records the same facts in its `machine` field.
 
-## Pass 1: 2026-11-28, founder-run, elevated, agent built from commit e71d7bd. **All 8 checks PASS.**
+## Pass 1, run 1: 2026-11-28, founder-run, elevated, agent built from commit e71d7bd. **All 9 checks PASS.**
+
+*(Its report is kept as `m15-service-acceptance.json.replaced-20261128-213205`, together with pass 2 attempt 1. An earlier version of this README said "8 checks": a miscount.)*
 
 | Check | Result |
 |---|---|
@@ -68,7 +70,30 @@ The JSON records this attempt exactly as the script wrote it.
   - **Pass 2 now checks this as `clean_shutdown_before_boot`:** no SCM 7023/7024/7031/7034 for UDCSAgent between the end of pass 1 and the boot. On today's events it finds exactly this 7024 and excludes pass 1's deliberate crash test (7031 at 20:17:56).
   - M1.5 cannot be accepted while this is open: workloads must checkpoint and stop cleanly when the PC shuts down.
 
-**Pass 2, attempt 2: not run yet.**
+## Pass 1, run 2: 2026-11-28 21:32, founder-run, after uninstall and reinstall, agent built from commit c5dd16f (shutdown fix). **All 9 recorded checks PASS, but E1 regressed.**
+
+This is `m15-service-acceptance.json`. The previous report was kept by `-ReplaceEvidence`.
+
+| Check | Result |
+|---|---|
+| `service_starts` | 0.44 s; first status after 5.4 s |
+| `session0_localsystem`, `no_visible_windows` | PASS |
+| `service_overhead` | 79.1 MiB RSS against an 80 MiB limit (62.9 MiB private), 0.47% of one core |
+| `helper_and_presence`, `workload_managed` | PASS (`throttled`, 810 units) |
+| `crash_recovery` | restarted after 5.4 s; resumed after 0.5 s from unit 890 |
+| `e1_completed` | PASS, but this only means the GPU check finished |
+| `graceful_stop` | 0.26 s, 0 processes left |
+
+- **E1 regression, caused by my redaction fix:**
+  - The service process still works: account `NT AUTHORITY\SYSTEM`, RTX 3060, 20 ms kernels.
+  - But `service_child_worker` and `session_worker_system`, which worked in run 1, now fail with "probe produced no result".
+  - **Cause, reproduced with the staged interpreter:** the new `_account()` imported pywin32 (`win32api`). The E1 children run `python -I`, where pywin32's DLLs are not on the search path, so `ImportError: DLL load failed while importing win32api` killed `probe()` before it wrote a result.
+  - **Fixed:** the identity lookup uses `ctypes` only (`OpenProcessToken`, `GetTokenInformation(TokenUser)`, `IsWellKnownSid`) and cannot raise. `node_agent/tests/test_gpu_probe_windows.py` launches the probe exactly like an E1 child; it fails on the c5dd16f code and passes on the fix.
+  - The **installed** agent (c5dd16f) still has the broken probe, so this run's E1 child result is a valid record of that build.
+- **Harness weakness exposed:** `e1_completed` passed although the children failed. Pass 1 now also records `e1_used_arrangements_ok`, which requires `service_process` and `service_child_worker` to succeed.
+- **Service overhead** is again within 1 MiB of the limit (79.1 MiB): consistent, and still unexplained.
+
+**Pass 2 for run 2: not run yet.** It needs a reboot, and its main purpose is to verify the shutdown fix on this build.
 
 **Scope.** This is new evidence for one machine, not proof of lab compatibility:
 - lab images are Pro, Education or Enterprise, often domain-joined and under Deep Freeze;

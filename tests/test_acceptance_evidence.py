@@ -85,7 +85,8 @@ def test_machine_evidence_never_holds_a_machine_account_name():
     # LocalSystem's USERNAME is HOSTNAME$ (NetBIOS name, up to 15 characters). The first
     # pass-1 run on machine 262cc47030b1 leaked it through the E1 probe's "account".
     machine_account = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,14}\$$")
-    for path in (EVIDENCE / "machines").rglob("*.json"):
+    machines = EVIDENCE / "machines"
+    for path in [*machines.rglob("*.json"), *machines.rglob("*.json.replaced-*")]:
         data = json.loads(path.read_text(encoding="utf-8-sig"))
         leaks = [s for s in _strings(data) if machine_account.match(s)]
         assert not leaks, f"{path}: machine account recorded: {leaks}"
