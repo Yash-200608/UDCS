@@ -32,7 +32,17 @@
   system-wide: no ACL outside the snapshot, no service, no acceptance evidence.
 #>
 [CmdletBinding()]
-param([Parameter(Mandatory)][string]$Staging, [switch]$AsSystem, [int]$TimeoutMinutes = 35)
+param([Parameter(Mandatory)][string]$Staging, [switch]$AsSystem, [switch]$AsService, [int]$TimeoutMinutes = 35)
+# -AsService: the same experiment inside a TEMPORARY Windows service, hosted exactly like
+# the agent (python.exe -I <script>, pywin32 ServiceFramework, LocalSystem,
+# `sc sidtype unrestricted`), so its token is the real service-token shape, with its own
+# NT SERVICE\UDCSTokenExperiment SID as the production analogue of NT SERVICE\UDCSAgent.
+# Cleanup: the service deletes itself when the experiment ends (DeleteService from inside,
+# effective once it stops); the finally block stops it (killing a hung process), deletes it
+# and removes the folder; it is start=demand with no restart actions, so it never starts by
+# itself; a leftover from a killed console is removed by the next run.
+if ($AsService) { $AsSystem = $true }
+$ServiceName = 'UDCSTokenExperiment'
 $ErrorActionPreference = 'Stop'
 $Repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $m3 = Join-Path $Repo 'tools\acceptance\m3_exposure_audit.ps1'
@@ -49,7 +59,44 @@ $Staging = [IO.Path]::GetFullPath($Staging)
 foreach ($need in 'python\python.exe', 'site\udcs_agent\cli.py') {
     if (-not (Test-Path -LiteralPath (Join-Path $Staging $need))) { throw "$Staging is not a package_agent.py staging folder (missing $need)." }
 }
-$dest = Join-Path $Diagnostics ("restricted-token-experiment-{0}-{1}.json" -f $(if ($AsSystem) { 'system' } else { 'user' }), $Stamp)
+$mode = if ($AsService) { 'service' } elseif ($AsSystem) { 'system' } else { 'user' }
+$dest = Join-Path $Diagnostics ("restricted-token-experiment-{0}-{1}.json" -f $mode, $Stamp)
+
+function Get-ManifestLines([string]$Path) {
+    # Per-file hashes, to name what changed (the hash-only manifest changed once, cause unknown).
+    $base = (Resolve-Path -LiteralPath $Path).Path.TrimEnd('\') + '\'
+    $map = @{}
+    Get-ChildItem -LiteralPath $Path -Recurse -File -Force | ForEach-Object {
+        $map[$_.FullName.Substring($base.Length)] = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
+    }
+    return $map
+}
+function Show-ManifestDiff($Before, $After) {
+    $changes = @()
+    foreach ($k in $After.Keys) {
+        if (-not $Before.ContainsKey($k)) { $changes += "added    $k" }
+        elseif ($Before[$k] -ne $After[$k]) { $changes += "changed  $k" }
+    }
+    foreach ($k in $Before.Keys) { if (-not $After.ContainsKey($k)) { $changes += "removed  $k" } }
+    if ($changes.Count) {
+        Write-Host "Snapshot changes ($($changes.Count)):" -ForegroundColor Yellow
+        $changes | Sort-Object | Select-Object -First 30 | ForEach-Object { Write-Host "  $_" }
+    } else { Write-Host 'Snapshot unchanged (per-file).' }
+}
+function Remove-ExperimentService {
+    $svc = Get-CimInstance Win32_Service -Filter "Name='$ServiceName'" -ErrorAction SilentlyContinue
+    if (-not $svc) { return $true }
+    if ($svc.State -ne 'Stopped') {
+        Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        while ((Get-Service $ServiceName -ErrorAction SilentlyContinue).Status -ne 'Stopped' -and $sw.Elapsed.TotalSeconds -lt 20) { Start-Sleep 1 }
+        $svc = Get-CimInstance Win32_Service -Filter "Name='$ServiceName'" -ErrorAction SilentlyContinue
+        if ($svc -and $svc.ProcessId) { Stop-Process -Id $svc.ProcessId -Force -ErrorAction SilentlyContinue }
+    }
+    & sc.exe delete $ServiceName | Out-Null
+    for ($i = 0; $i -lt 15 -and (Get-Service $ServiceName -ErrorAction SilentlyContinue); $i++) { Start-Sleep 1 }
+    return -not (Get-Service $ServiceName -ErrorAction SilentlyContinue)
+}
 
 function Copy-Snapshot([string]$App) {
     & robocopy.exe $Staging $App /E /XJ /COPY:D /DCOPY:D /R:0 /W:0 /NFL /NDL /NJH /NJS /NP | Out-Null
@@ -85,9 +132,102 @@ foreach ($stale in @(Get-ScheduledTask -TaskName "$Prefix*" -ErrorAction Silentl
     if ($stale.State -eq 'Running') { Stop-ScheduledTask -TaskName $stale.TaskName }
     Unregister-ScheduledTask -TaskName $stale.TaskName -Confirm:$false
 }
+if (Get-Service $ServiceName -ErrorAction SilentlyContinue) {
+    Write-Host "Removing a stale service from an interrupted run: $ServiceName" -ForegroundColor Yellow
+    if (-not (Remove-ExperimentService)) { throw "Could not remove the stale service $ServiceName." }
+}
 foreach ($old in @(Get-ChildItem -LiteralPath $env:ProgramData -Directory -Force -Filter "$Prefix*" -ErrorAction SilentlyContinue)) {
     Write-Host "Removing a stale folder: $($old.FullName)" -ForegroundColor Yellow
     if (-not (Remove-TreeNoFollow $old.FullName)) { throw "Could not remove $($old.FullName)." }
+}
+
+if ($AsService) {
+    $Root = Join-Path $env:ProgramData "$Prefix$([guid]::NewGuid().ToString('N').Substring(0, 12))"
+    $App = Join-Path $Root 'app'
+    $out = Join-Path $Root 'result.json'
+    $log = Join-Path $Root 'experiment.log'
+    $created = $false
+    try {
+        New-ProtectedDirectory $Root
+        Write-Host "Protected folder: $Root (SYSTEM and Administrators only)"
+        Copy-Snapshot $App
+        $runner = Join-Path $App 'run_service_experiment.py'
+        $body = @"
+import os, site, sys
+ROOT = os.path.dirname(os.path.abspath(__file__))
+site.addsitedir(os.path.join(ROOT, 'site'))
+import runpy, traceback
+import servicemanager, win32service, win32serviceutil
+
+NAME = '$ServiceName'
+EXPERIMENT = r'$App\restricted_token_experiment.py'
+
+
+class ExperimentService(win32serviceutil.ServiceFramework):
+    _svc_name_ = NAME
+    _svc_display_name_ = 'UDCS token experiment (temporary, deletes itself)'
+
+    def SvcStop(self):
+        self.ReportServiceStatus(win32service.SERVICE_STOP_PENDING)
+
+    def SvcDoRun(self):
+        log = open(r'$log', 'w', encoding='utf-8', buffering=1)
+        sys.stdout = sys.stderr = log
+        try:
+            sys.argv = [EXPERIMENT, '--out', r'$out', '--work', r'$Root\work']
+            runpy.run_path(EXPERIMENT, run_name='__main__')
+        except SystemExit:
+            pass
+        except BaseException:
+            traceback.print_exc()
+        finally:
+            try:  # deterministic cleanup even if the console that started us is gone
+                scm = win32service.OpenSCManager(None, None, win32service.SC_MANAGER_CONNECT)
+                handle = win32service.OpenService(scm, NAME, 0x00010000)  # DELETE
+                win32service.DeleteService(handle)
+                print('service deletion requested (effective when stopped)')
+            except Exception:
+                traceback.print_exc()
+
+
+servicemanager.Initialize()
+servicemanager.PrepareToHostSingle(ExperimentService)
+servicemanager.StartServiceCtrlDispatcher()
+"@
+        [IO.File]::WriteAllText($runner, $body, (New-Object Text.UTF8Encoding $false))
+        $beforeMap = Get-ManifestLines $App
+        $before = Get-Manifest $App
+        Write-Host ("Snapshot: {0} files, manifest sha256 {1}" -f $before.files, $before.sha256)
+        $python = Join-Path $App 'python\python.exe'
+        New-Service -Name $ServiceName -BinaryPathName "`"$python`" -I -B `"$runner`"" `
+            -DisplayName 'UDCS token experiment (temporary)' -StartupType Manual | Out-Null
+        $created = $true
+        & sc.exe sidtype $ServiceName unrestricted | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "sc sidtype failed ($LASTEXITCODE)" }
+        & sc.exe failure $ServiceName reset= 0 actions= "" | Out-Null  # never restart
+        Start-Service $ServiceName
+        Write-Host "Running the experiment inside the temporary LocalSystem service $ServiceName, up to $TimeoutMinutes min..."
+        $deadline = (Get-Date).AddMinutes($TimeoutMinutes)
+        do { Start-Sleep -Seconds 5 } while (-not (Test-Path -LiteralPath $out) -and (Get-Service $ServiceName -ErrorAction SilentlyContinue).Status -eq 'Running' -and (Get-Date) -lt $deadline)
+        Start-Sleep -Seconds 3  # let the service finish writing and request its deletion
+        Show-ManifestDiff $beforeMap (Get-ManifestLines $App)
+        if (-not (Test-Path -LiteralPath $out)) {
+            Write-Host (Get-Content -LiteralPath $log -Raw -ErrorAction SilentlyContinue)
+            throw 'No result was produced; see the log above.'
+        }
+        Write-Host ((Get-Content -LiteralPath $log -Raw -ErrorAction SilentlyContinue) -split "`n" | Select-String 'deletion requested')
+        Copy-Safe $out $dest
+    } finally {
+        if ($created -or (Get-Service $ServiceName -ErrorAction SilentlyContinue)) {
+            if (Remove-ExperimentService) { Write-Host "Service $ServiceName removed." }
+            else { Write-Host "WARNING: could not remove service $ServiceName; the next run removes it, or: sc.exe delete $ServiceName" -ForegroundColor Yellow }
+        }
+        if ((Test-Path -LiteralPath $Root) -and -not (Remove-TreeNoFollow $Root)) {
+            Write-Host "WARNING: could not remove $Root; the next run removes it." -ForegroundColor Yellow
+        }
+    }
+    Write-Host "DIAGNOSTIC ONLY (temporary LocalSystem service, not acceptance evidence): $dest" -ForegroundColor Yellow
+    exit 0
 }
 $name = "$Prefix$([guid]::NewGuid().ToString('N').Substring(0, 12))"
 $Root = Join-Path $env:ProgramData $name
